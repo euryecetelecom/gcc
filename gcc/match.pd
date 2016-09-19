@@ -1504,14 +1504,22 @@ DEFINE_INT_AND_FLOAT_ROUND_FN (RINT)
 	       CONSTANT_CLASS_P@2)
      /* If one of the types wraps, use that one.  */
      (if (!ANY_INTEGRAL_TYPE_P (type) || TYPE_OVERFLOW_WRAPS (type))
-      (if (outer_op == PLUS_EXPR)
-       (plus (view_convert @0) (inner_op @2 (view_convert @1)))
-       (minus (view_convert @0) (neg_inner_op @2 (view_convert @1))))
+      (with { tree cst = fold_unary (VIEW_CONVERT_EXPR, type, @1);
+              if (cst)
+	        cst = const_binop (outer_op == PLUS_EXPR
+				   ? inner_op : neg_inner_op,
+				   type, @2, cst); }
+       (if (cst)
+	(outer_op (view_convert @0) { cst; })))
       (if (!ANY_INTEGRAL_TYPE_P (TREE_TYPE (@0))
 	   || TYPE_OVERFLOW_WRAPS (TREE_TYPE (@0)))
-       (if (outer_op == PLUS_EXPR)
-	(view_convert (plus @0 (inner_op (view_convert @2) @1)))
-	(view_convert (minus @0 (neg_inner_op (view_convert @2) @1))))
+       (with { tree cst = fold_unary (VIEW_CONVERT_EXPR, TREE_TYPE (@0), @2);
+	       if (cst)
+		 cst = const_binop (outer_op == PLUS_EXPR
+				    ? inner_op : neg_inner_op,
+				    TREE_TYPE (@0), cst, @1); }
+	(if (cst)
+	 (view_convert (outer_op @0 { cst; }))))
        /* If the constant operation overflows we cannot do the transform
 	  directly as we would introduce undefined overflow, for example
 	  with (a - 1) + INT_MIN.  */

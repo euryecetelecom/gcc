@@ -2784,7 +2784,7 @@ dr_group_sort_cmp (const void *dra_, const void *drb_)
 
   /* Then sort after DR_CONST_OFFSET.  In case of identical DRs sort after
      stmt UID.  */
-  cmp = tree_int_cst_compare (DR_CONST_OFFSET (dra), DR_CONST_OFFSET (drb));
+  cmp = data_ref_compare_tree (DR_CONST_OFFSET (dra), DR_CONST_OFFSET (drb));
   if (cmp == 0)
     return gimple_uid (DR_STMT (dra)) < gimple_uid (DR_STMT (drb)) ? -1 : 1;
   return cmp;

@@ -1252,8 +1252,10 @@ data_ref_compare_tree (tree t1, tree t2)
   code = TREE_CODE (t1);
   switch (code)
     {
-    /* For const values, we can just use hash values for comparisons.  */
     case INTEGER_CST:
+      return tree_int_cst_compare (t1, t2);
+
+    /* For const values, we can just use hash values for comparisons.  */
     case REAL_CST:
     case FIXED_CST:
     case STRING_CST:

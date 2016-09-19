@@ -1030,6 +1030,9 @@ extern void omp_clause_range_check_failed (const_tree, const char *, int,
 #define VECTOR_CST_ELTS(NODE) (VECTOR_CST_CHECK (NODE)->vector.elts)
 #define VECTOR_CST_ELT(NODE,IDX) (VECTOR_CST_CHECK (NODE)->vector.elts[IDX])
 
+/* In a POLY_CST node.  */
+#define POLY_CST_ELT(NODE, IDX) (POLY_CST_CHECK (NODE)->poly.elts[IDX])
+
 /* Define fields and accessors for some special-purpose tree nodes.  */
 
 #define IDENTIFIER_LENGTH(NODE) \
@@ -4016,15 +4019,18 @@ build5_loc (location_t loc, enum tree_code code, tree type, tree arg0,
 
 extern tree double_int_to_tree (tree, double_int);
 
+extern tree poly_wide_int_to_tree (tree, const poly_wide_int &);
+extern tree poly_offset_int_to_tree (tree type, const poly_offset_int &cst);
+extern tree poly_widest_int_to_tree (tree, const poly_widest_int &);
 extern tree wide_int_to_tree (tree type, const wide_int_ref &cst);
 extern tree force_fit_type (tree, const wide_int_ref &, int, bool);
 
 /* Create an INT_CST node with a CST value zero extended.  */
 
 /* static inline */
-extern tree build_int_cst (tree, HOST_WIDE_INT);
-extern tree build_int_cstu (tree type, unsigned HOST_WIDE_INT cst);
-extern tree build_int_cst_type (tree, HOST_WIDE_INT);
+extern tree build_int_cst (tree, poly_int64);
+extern tree build_int_cstu (tree type, poly_uint64);
+extern tree build_int_cst_type (tree, poly_int64);
 extern tree make_vector (unsigned CXX_MEM_STAT_INFO);
 extern tree build_vector (tree, unsigned int, tree * CXX_MEM_STAT_INFO);
 extern tree build_vector_from_ctor (tree, vec<constructor_elt, va_gc> *);
@@ -4044,6 +4050,7 @@ extern tree build_minus_one_cst (tree);
 extern tree build_all_ones_cst (tree);
 extern tree build_zero_cst (tree);
 extern tree build_string (int, const char *);
+extern tree build_poly_cst (tree, const tree (&)[NUM_POLY_INT_COEFFS]);
 extern tree build_tree_list (tree, tree CXX_MEM_STAT_INFO);
 extern tree build_tree_list_vec (const vec<tree, va_gc> * CXX_MEM_STAT_INFO);
 extern tree build_decl (location_t, enum tree_code,
@@ -4092,7 +4099,7 @@ extern tree build_opaque_vector_type (tree innertype, int nunits);
 extern tree build_index_type (tree);
 extern tree build_array_type (tree, tree, bool = false);
 extern tree build_nonshared_array_type (tree, tree);
-extern tree build_array_type_nelts (tree, unsigned HOST_WIDE_INT);
+extern tree build_array_type_nelts (tree, poly_uint64);
 extern tree build_function_type (tree, tree);
 extern tree build_function_type_list (tree, ...);
 extern tree build_varargs_function_type_list (tree, ...);
@@ -4692,6 +4699,17 @@ complete_or_array_type_p (const_tree type)
 
 extern tree strip_float_extensions (tree);
 extern int really_constant_p (const_tree);
+extern bool ptrdiff_tree_p (const_tree, poly_int64 *);
+extern bool poly_tree_p (const_tree, poly_int64 *);
+extern bool poly_tree_p (const_tree, poly_uint64 *);
+extern bool poly_tree_p (const_tree, poly_offset_int *);
+extern bool poly_tree_p (const_tree, poly_wide_int *);
+extern bool poly_tree_p (const_tree, poly_widest_int *);
+extern poly_int64 tree_to_poly_int64 (const_tree);
+extern poly_uint64 tree_to_poly_uint64 (const_tree);
+extern poly_offset_int tree_to_poly_offset_int (const_tree);
+extern poly_wide_int tree_to_poly_wide_int (const_tree);
+extern poly_widest_int tree_to_poly_widest_int (const_tree);
 extern bool decl_address_invariant_p (const_tree);
 extern bool decl_address_ip_invariant_p (const_tree);
 extern bool int_fits_type_p (const_tree, const_tree);
@@ -4721,6 +4739,7 @@ static inline hashval_t iterative_hash_expr(const_tree tree, hashval_t seed)
 }
 
 extern int compare_tree_int (const_tree, unsigned HOST_WIDE_INT);
+extern bool equal_tree_size (const_tree, poly_uint64);
 extern int type_list_equal (const_tree, const_tree);
 extern int chain_member (const_tree, const_tree);
 extern void dump_tree_statistics (void);
