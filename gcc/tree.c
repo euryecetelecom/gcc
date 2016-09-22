@@ -2342,6 +2342,8 @@ integer_zerop (const_tree expr)
 	    return false;
 	return true;
       }
+    case VEC_DUPLICATE_EXPR:
+      return integer_zerop (TREE_OPERAND (expr, 0));
     default:
       return false;
     }
@@ -2368,6 +2370,8 @@ integer_onep (const_tree expr)
 	    return false;
 	return true;
       }
+    case VEC_DUPLICATE_EXPR:
+      return integer_onep (TREE_OPERAND (expr, 0));
     default:
       return false;
     }
@@ -2405,6 +2409,9 @@ integer_all_onesp (const_tree expr)
 	  return 0;
       return 1;
     }
+
+  else if (TREE_CODE (expr) == VEC_DUPLICATE_EXPR)
+    return integer_all_onesp (TREE_OPERAND (expr, 0));
 
   else if (TREE_CODE (expr) != INTEGER_CST)
     return 0;
@@ -2461,7 +2468,7 @@ integer_nonzerop (const_tree expr)
 int
 integer_truep (const_tree expr)
 {
-  if (TREE_CODE (expr) == VECTOR_CST)
+  if (TREE_CODE (expr) == VECTOR_CST || TREE_CODE (expr) == VEC_DUPLICATE_EXPR)
     return integer_all_onesp (expr);
   return integer_onep (expr);
 }
@@ -2638,6 +2645,8 @@ real_zerop (const_tree expr)
 	    return false;
 	return true;
       }
+    case VEC_DUPLICATE_EXPR:
+      return real_zerop (TREE_OPERAND (expr, 0));
     default:
       return false;
     }
@@ -2666,6 +2675,8 @@ real_onep (const_tree expr)
 	    return false;
 	return true;
       }
+    case VEC_DUPLICATE_EXPR:
+      return real_onep (TREE_OPERAND (expr, 0));
     default:
       return false;
     }
@@ -2693,6 +2704,8 @@ real_minus_onep (const_tree expr)
 	    return false;
 	return true;
       }
+    case VEC_DUPLICATE_EXPR:
+      return real_minus_onep (TREE_OPERAND (expr, 0));
     default:
       return false;
     }
@@ -4439,7 +4452,9 @@ build1 (enum tree_code code, tree type, tree node MEM_STAT_DECL)
       break;
 
     default:
-      if ((TREE_CODE_CLASS (code) == tcc_unary || code == VIEW_CONVERT_EXPR)
+      if ((TREE_CODE_CLASS (code) == tcc_unary
+	   || code == VIEW_CONVERT_EXPR
+	   || code == VEC_DUPLICATE_EXPR)
 	  && node && !TYPE_P (node)
 	  && TREE_CONSTANT (node))
 	TREE_CONSTANT (t) = 1;
@@ -10351,6 +10366,9 @@ initializer_zerop (const_tree init)
 	return true;
       }
 
+    case VEC_DUPLICATE_EXPR:
+      return initializer_zerop (TREE_OPERAND (init, 0));
+
     case CONSTRUCTOR:
       {
 	unsigned HOST_WIDE_INT idx;
@@ -10396,7 +10414,10 @@ uniform_vector_p (const_tree vec)
 
   gcc_assert (VECTOR_TYPE_P (TREE_TYPE (vec)));
 
-  if (TREE_CODE (vec) == VECTOR_CST)
+  if (TREE_CODE (vec) == VEC_DUPLICATE_EXPR)
+    return TREE_OPERAND (vec, 0);
+
+  else if (TREE_CODE (vec) == VECTOR_CST)
     {
       first = VECTOR_CST_ELT (vec, 0);
       for (i = 1; i < VECTOR_CST_NELTS (vec); ++i)
