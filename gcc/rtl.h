@@ -2753,7 +2753,9 @@ extern bool rtvec_all_equal_p (const_rtvec);
 inline bool
 const_vec_duplicate_p (const_rtx x)
 {
-  return GET_CODE (x) == CONST_VECTOR && rtvec_all_equal_p (XVEC (x, 0));
+  return ((GET_CODE (x) == CONST_VECTOR && rtvec_all_equal_p (XVEC (x, 0)))
+	  || (GET_CODE (x) == CONST
+	      && GET_CODE (XEXP (x, 0)) == VEC_DUPLICATE));
 }
 
 /* Return true if X is a vector constant with a duplicated element value.
@@ -2763,9 +2765,14 @@ template <typename T>
 inline bool
 const_vec_duplicate_p (T x, T *elt)
 {
-  if (const_vec_duplicate_p (x))
+  if (GET_CODE (x) == CONST_VECTOR && rtvec_all_equal_p (XVEC (x, 0)))
     {
       *elt = CONST_VECTOR_ELT (x, 0);
+      return true;
+    }
+  if (GET_CODE (x) == CONST && GET_CODE (XEXP (x, 0)) == VEC_DUPLICATE)
+    {
+      *elt = XEXP (XEXP (x, 0), 0);
       return true;
     }
   return false;
@@ -2778,8 +2785,10 @@ template <typename T>
 inline T
 unwrap_const_vec_duplicate (T x)
 {
-  if (const_vec_duplicate_p (x))
-    x = CONST_VECTOR_ELT (x, 0);
+  if (GET_CODE (x) == CONST_VECTOR && rtvec_all_equal_p (XVEC (x, 0)))
+    return CONST_VECTOR_ELT (x, 0);
+  if (GET_CODE (x) == CONST && GET_CODE (XEXP (x, 0)) == VEC_DUPLICATE)
+    return XEXP (XEXP (x, 0), 0);
   return x;
 }
 
