@@ -959,8 +959,8 @@ vect_compute_data_ref_alignment (struct data_reference *dr)
       DR_VECT_AUX (dr)->base_misaligned = true;
       base_misalignment = 0;
     }
-  unsigned int misalignment = (base_misalignment
-			       + TREE_INT_CST_LOW (drb->const_offset));
+  poly_int64 misalignment = (base_misalignment
+			     + TREE_INT_CST_LOW (drb->const_offset));
 
   /* If this is a backward running DR then first access in the larger
      vectype actually is N-1 elements before the address in the DR.
@@ -970,7 +970,21 @@ vect_compute_data_ref_alignment (struct data_reference *dr)
     misalignment += ((TYPE_VECTOR_SUBPARTS (vectype) - 1)
 		     * TREE_INT_CST_LOW (drb->step));
 
-  SET_DR_MISALIGNMENT (dr, misalignment & (vector_alignment - 1));
+  unsigned int const_misalignment;
+  if (!known_misalignment (misalignment, vector_alignment,
+			   &const_misalignment))
+    {
+      if (dump_enabled_p ())
+	{
+	  dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			   "Non-constant misalignment for access: ");
+	  dump_generic_expr (MSG_MISSED_OPTIMIZATION, TDF_SLIM, ref);
+	  dump_printf (MSG_MISSED_OPTIMIZATION, "\n");
+	}
+      return true;
+    }
+
+  SET_DR_MISALIGNMENT (dr, const_misalignment);
 
   if (dump_enabled_p ())
     {
