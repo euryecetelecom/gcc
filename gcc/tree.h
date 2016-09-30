@@ -5429,4 +5429,16 @@ type_has_mode_precision_p (const_tree t)
   return TYPE_PRECISION (t) == GET_MODE_PRECISION (TYPE_MODE (t));
 }
 
+/* Return true if OP is either an explicit tree constant (tcc_constant),
+   or a tree that acts like one.  */
+
+inline bool
+constant_tree_p (const_tree op)
+{
+  return (CONSTANT_CLASS_P (op)
+	  || (TREE_CONSTANT (op)
+	      && (TREE_CODE (op) == VEC_DUPLICATE_EXPR
+		  || TREE_CODE (op) == VEC_SERIES_EXPR)));
+}
+
 #endif  /* GCC_TREE_H  */
