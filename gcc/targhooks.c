@@ -743,7 +743,7 @@ default_function_arg_padding (machine_mode mode, const_tree type)
   if (!BYTES_BIG_ENDIAN)
     return PAD_UPWARD;
 
-  unsigned HOST_WIDE_INT size;
+  poly_uint64 size;
   if (mode == BLKmode)
     {
       if (!type || TREE_CODE (TYPE_SIZE (type)) != INTEGER_CST)
@@ -753,7 +753,7 @@ default_function_arg_padding (machine_mode mode, const_tree type)
   else
     size = GET_MODE_SIZE (mode);
 
-  if (size < (PARM_BOUNDARY / BITS_PER_UNIT))
+  if (must_lt (size, (unsigned int) PARM_BOUNDARY / BITS_PER_UNIT))
     return PAD_DOWNWARD;
 
   return PAD_UPWARD;

@@ -2052,7 +2052,7 @@ instrument_object_size (gimple_stmt_iterator *gsi, tree t, bool is_lhs)
   location_t loc = gimple_location (stmt);
   tree type;
   tree index = NULL_TREE;
-  HOST_WIDE_INT size_in_bytes;
+  poly_int64 size_in_bytes;
 
   type = TREE_TYPE (t);
   if (VOID_TYPE_P (type))
@@ -2083,7 +2083,7 @@ instrument_object_size (gimple_stmt_iterator *gsi, tree t, bool is_lhs)
     }
 
   size_in_bytes = int_size_in_bytes (type);
-  if (size_in_bytes <= 0)
+  if (must_le (size_in_bytes, 0))
     return;
 
   poly_int64 bitsize, bitpos;

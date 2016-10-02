@@ -131,8 +131,8 @@ brig_code_entry_handler::build_tree_operand (const BrigInstBase &brig_inst,
 	       fp16-fp32 conversion is done in build_operands ().  */
 	    if (is_input && TREE_TYPE (element) != operand_type)
 	      {
-		if (int_size_in_bytes (TREE_TYPE (element))
-		    == int_size_in_bytes (operand_type)
+		if (int_size_in_bytes_hwi (TREE_TYPE (element))
+		    == int_size_in_bytes_hwi (operand_type)
 		    && !INTEGRAL_TYPE_P (operand_type))
 		  element = build1 (VIEW_CONVERT_EXPR, operand_type, element);
 		else
@@ -825,7 +825,7 @@ brig_code_entry_handler::get_comparison_result_type (tree source_type)
 {
   if (VECTOR_TYPE_P (source_type))
     {
-      size_t element_size = int_size_in_bytes (TREE_TYPE (source_type));
+      size_t element_size = int_size_in_bytes_hwi (TREE_TYPE (source_type));
       return build_vector_type
 	(build_nonstandard_boolean_type (element_size * BITS_PER_UNIT),
 	 TYPE_VECTOR_SUBPARTS (source_type));
@@ -1309,8 +1309,8 @@ brig_code_entry_handler::build_operands (const BrigInstBase &brig_inst)
 		   && operand_data->kind != BRIG_KIND_OPERAND_ADDRESS
 		   && !VECTOR_TYPE_P (TREE_TYPE (operand)))
 	    {
-	      size_t reg_width = int_size_in_bytes (TREE_TYPE (operand));
-	      size_t instr_width = int_size_in_bytes (operand_type);
+	      size_t reg_width = int_size_in_bytes_hwi (TREE_TYPE (operand));
+	      size_t instr_width = int_size_in_bytes_hwi (operand_type);
 	      if (reg_width == instr_width)
 		operand = build_reinterpret_cast (operand_type, operand);
 	      else if (reg_width > instr_width)
@@ -1423,7 +1423,7 @@ brig_code_entry_handler::build_output_assignment (const BrigInstBase &brig_inst,
 	  tree element_ref
 	    = build3 (BIT_FIELD_REF, element_type, input,
 		      TYPE_SIZE (element_type),
-		      bitsize_int (i * int_size_in_bytes (element_type)
+		      bitsize_int (i * int_size_in_bytes_hwi (element_type)
 				   *  BITS_PER_UNIT));
 
 	  last_assign
@@ -1436,8 +1436,8 @@ brig_code_entry_handler::build_output_assignment (const BrigInstBase &brig_inst,
       /* All we do here is to bitcast the result and store it to the
 	 'register' (variable).  Mainly need to take care of differing
 	 bitwidths.  */
-      size_t src_width = int_size_in_bytes (input_type);
-      size_t dst_width = int_size_in_bytes (output_type);
+      size_t src_width = int_size_in_bytes_hwi (input_type);
+      size_t dst_width = int_size_in_bytes_hwi (output_type);
 
       if (src_width == dst_width)
 	{
@@ -1472,9 +1472,9 @@ brig_code_entry_handler::append_statement (tree stmt)
 void
 brig_code_entry_handler::unpack (tree value, tree_stl_vec &elements)
 {
-  size_t vec_size = int_size_in_bytes (TREE_TYPE (value));
+  size_t vec_size = int_size_in_bytes_hwi (TREE_TYPE (value));
   size_t element_size
-    = int_size_in_bytes (TREE_TYPE (TREE_TYPE (value))) * BITS_PER_UNIT;
+    = int_size_in_bytes_hwi (TREE_TYPE (TREE_TYPE (value))) * BITS_PER_UNIT;
   size_t element_count
     = vec_size * BITS_PER_UNIT / element_size;
 
@@ -1530,8 +1530,9 @@ tree_element_unary_visitor::operator () (brig_code_entry_handler &handler,
 {
   if (VECTOR_TYPE_P (TREE_TYPE (operand)))
     {
-      size_t vec_size = int_size_in_bytes (TREE_TYPE (operand));
-      size_t element_size = int_size_in_bytes (TREE_TYPE (TREE_TYPE (operand)));
+      size_t vec_size = int_size_in_bytes_hwi (TREE_TYPE (operand));
+      size_t element_size
+	= int_size_in_bytes_hwi (TREE_TYPE (TREE_TYPE (operand)));
       size_t element_count = vec_size / element_size;
 
       tree input_element_type = TREE_TYPE (TREE_TYPE (operand));
@@ -1578,9 +1579,9 @@ tree_element_binary_visitor::operator () (brig_code_entry_handler &handler,
   if (VECTOR_TYPE_P (TREE_TYPE (operand0)))
     {
       gcc_assert (VECTOR_TYPE_P (TREE_TYPE (operand1)));
-      size_t vec_size = int_size_in_bytes (TREE_TYPE (operand0));
+      size_t vec_size = int_size_in_bytes_hwi (TREE_TYPE (operand0));
       size_t element_size
-	= int_size_in_bytes (TREE_TYPE (TREE_TYPE (operand0)));
+	= int_size_in_bytes_hwi (TREE_TYPE (TREE_TYPE (operand0)));
       size_t element_count = vec_size / element_size;
 
       tree input_element_type = TREE_TYPE (TREE_TYPE (operand0));
@@ -1628,7 +1629,7 @@ tree_element_binary_visitor::operator () (brig_code_entry_handler &handler,
 tree
 flush_to_zero::visit_element (brig_code_entry_handler &, tree operand)
 {
-  size_t size = int_size_in_bytes (TREE_TYPE (operand));
+  size_t size = int_size_in_bytes_hwi (TREE_TYPE (operand));
   if (size == 4)
     {
       tree built_in
