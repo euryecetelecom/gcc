@@ -660,6 +660,13 @@ fixed_size_mode::includes_p (machine_mode)
   return true;
 }
 
+/* Wrapper for mode arguments to target macros, so that if a target
+   doesn't need polynomial-sized modes, its header file can continue
+   to treat everything as fixed_size_mode.  This should go away once
+   macros are moved to target hooks.  It shouldn't be used in other
+   contexts.  */
+#define MACRO_MODE(MODE) (MODE)
+
 /* Return the mode for data of a given size SIZE and mode class CLASS.
    If LIMIT is nonzero, then don't use modes bigger than MAX_FIXED_MODE_SIZE.
    The value is BLKmode if no other mode is found.  */
