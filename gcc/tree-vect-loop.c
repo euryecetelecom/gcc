@@ -1174,6 +1174,7 @@ _loop_vec_info::_loop_vec_info (struct loop *loop_in)
     speculative_execution (false),
     can_fully_mask_p (true),
     fully_masked_p (false),
+    firstfaulting_execution (false),
     peeling_for_gaps (false),
     peeling_for_niter (false),
     operands_swapped (false),
@@ -2457,14 +2458,16 @@ start_over:
   if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
       && !LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo)
       && LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo)
+      && !LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo)
       && !LOOP_VINFO_NEEDS_NONSPECULATIVE_MASKS (loop_vinfo)
       && !use_capped_vf (loop_vinfo))
     {
       LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
       if (dump_enabled_p ())
-	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
-			 "No need to predicate speculative loops without "
-			 "alignment peeling.\n");
+	dump_printf_loc (MSG_NOTE, vect_location,
+			 "No need to fully mask this speculative loop;"
+			 " it doesn't require first-faulting instructions"
+			 " and everything is naturally aligned.\n");
     }
 
   /* Decide whether to use a fully-masked loop for this vectorization
@@ -2484,6 +2487,15 @@ start_over:
 
   if (!LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
     {
+      if (LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo))
+	{
+	  if (dump_enabled_p ())
+	    dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			     "Not vectorized: first-faulting loads require "
+			     "a fully-masked loop.\n");
+	  return false;
+	}
+
       if (LOOP_VINFO_NEEDS_NONSPECULATIVE_MASKS (loop_vinfo))
 	{
 	  if (dump_enabled_p ())
@@ -7978,36 +7990,58 @@ vectorizable_induction (gimple *phi,
       vec_init = vect_init_vector (phi, new_vec, vectype, NULL);
     }
 
-
   /* Create the vector that holds the step of the induction.  */
-  if (nested_in_vect_loop)
-    /* iv_loop is nested in the loop to be vectorized. Generate:
-       vec_step = [S, S, S, S]  */
-    new_name = step_expr;
+  if (LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo))
+    {
+      bool insert_after;
+      standard_iv_increment_position (loop, &si, &insert_after);
+      gcc_assert (!insert_after);
+
+      t = LOOP_VINFO_NONFAULTING (loop_vinfo).niters;
+      tree step_type = TREE_TYPE (step_expr);
+      gimple_seq seq = NULL;
+
+      /* Create scalar version of step.  */
+      t = gimple_convert (&seq, step_type, t);
+
+      /* Create vector version of step.  */
+      new_vec = gimple_build_vector_from_val (&seq, vectype, t);
+      gsi_insert_seq_before (&si, seq, GSI_SAME_STMT);
+      vec_step = vect_init_vector (phi, new_vec, vectype, &si);
+    }
   else
     {
-      /* iv_loop is the loop to be vectorized. Generate:
-	  vec_step = [VF*S, VF*S, VF*S, VF*S]  */
-      gimple_seq seq = NULL;
-      if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (step_expr)))
-	expr = gimple_build (&seq, FLOAT_EXPR, TREE_TYPE (step_expr), vf);
+      si = gsi_after_labels (bb);
+
+      /* Create the vector that holds the step of the induction.  */
+      if (nested_in_vect_loop)
+	/* iv_loop is nested in the loop to be vectorized.  Generate:
+	   vec_step = [S, S, S, S]  */
+	new_name = step_expr;
       else
-	expr = gimple_convert (&seq, TREE_TYPE (step_expr), vf);
-      new_name = gimple_build (&seq, MULT_EXPR, TREE_TYPE (step_expr),
-			       expr, step_expr);
-      if (seq)
 	{
-	  new_bb = gsi_insert_seq_on_edge_immediate (pe, seq);
-	  gcc_assert (!new_bb);
+	  /* iv_loop is the loop to be vectorized.  Generate:
+	     vec_step = [VF*S, VF*S, VF*S, VF*S]  */
+	  gimple_seq seq = NULL;
+	  if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (step_expr)))
+	    expr = gimple_build (&seq, FLOAT_EXPR, TREE_TYPE (step_expr), vf);
+	  else
+	    expr = gimple_convert (&seq, TREE_TYPE (step_expr), vf);
+	  new_name = gimple_build (&seq, MULT_EXPR, TREE_TYPE (step_expr),
+				   expr, step_expr);
+	  if (seq)
+	    {
+	      new_bb = gsi_insert_seq_on_edge_immediate (pe, seq);
+	      gcc_assert (!new_bb);
+	    }
 	}
+
+      t = unshare_expr (new_name);
+      gcc_assert (constant_tree_p (new_name)
+		  || TREE_CODE (new_name) == SSA_NAME);
+      new_vec = build_vector_from_val (vectype, t);
+      vec_step = vect_init_vector (phi, new_vec, vectype, NULL);
     }
-
-  t = unshare_expr (new_name);
-  gcc_assert (constant_tree_p (new_name)
-	      || TREE_CODE (new_name) == SSA_NAME);
-  new_vec = build_vector_from_val (vectype, t);
-  vec_step = vect_init_vector (phi, new_vec, vectype, NULL);
-
 
   /* Create the following def-use cycle:
      loop prolog:
@@ -8052,6 +8086,9 @@ vectorizable_induction (gimple *phi,
       stmt_vec_info prev_stmt_vinfo;
       /* FORNOW. This restriction should be relaxed.  */
       gcc_assert (!nested_in_vect_loop);
+
+      if (LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo))
+	si = gsi_after_labels (bb);
 
       /* Create the vector that holds the step of the induction.  */
       if (SCALAR_FLOAT_TYPE_P (TREE_TYPE (step_expr)))
@@ -8820,6 +8857,33 @@ vect_transform_loop (loop_vec_info loop_vinfo)
   if (LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo))
     {
       tree mask_type = vect_mask_type_for_speculation (loop_vinfo);
+      if (LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo))
+	{
+	  /* Update the IVs.  */
+	  gimple *tmp_stmt;
+	  gcc_assert (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo));
+
+	  gimple_stmt_iterator iv_gsi;
+	  bool insert_after;
+	  standard_iv_increment_position (loop, &iv_gsi, &insert_after);
+
+	  /* Read the non-faulting mask.  */
+	  tree nfmask = make_temp_ssa_name (mask_type, NULL, "nfmask");
+	  tmp_stmt = gimple_build_call_internal (IFN_READ_NF, 0);
+	  gimple_call_set_lhs (tmp_stmt, nfmask);
+	  gsi_insert_before (&iv_gsi, tmp_stmt, GSI_SAME_STMT);
+
+	  /* Find the number steps the loop iterated on the current pass.  */
+	  tree loop_iter = make_temp_ssa_name (sizetype, NULL, "loop_iter");
+	  tmp_stmt = gimple_build_call_internal (IFN_MASK_POPCOUNT, 1,
+						 nfmask);
+	  gimple_call_set_lhs (tmp_stmt, loop_iter);
+	  gsi_insert_before (&iv_gsi, tmp_stmt, GSI_SAME_STMT);
+
+	  LOOP_VINFO_NONFAULTING (loop_vinfo).mask = nfmask;
+	  LOOP_VINFO_NONFAULTING (loop_vinfo).niters = loop_iter;
+	}
+
       /* Create a dummy definition of the exit mask.  We'll fill in the
 	 real definition later.  */
       tree mask = make_temp_ssa_name (mask_type, NULL, "exit_mask");

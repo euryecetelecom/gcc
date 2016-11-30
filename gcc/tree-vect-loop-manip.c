@@ -458,6 +458,17 @@ vect_set_speculative_masks (struct loop *loop, loop_vec_info loop_vinfo)
 					     rgm, nscalariters_skip);
       }
 
+  if (LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo))
+    {
+      /* At the start of each iteration, set the no fault detected mask to
+	 be full.  */
+      tree mask_type = vect_mask_type_for_speculation (loop_vinfo);
+      tree initial_ffr = build_int_cst (TREE_TYPE (mask_type), 1);
+      initial_ffr = build_vector_from_val (mask_type, initial_ffr);
+      gcall *call = gimple_build_call_internal (IFN_WRITE_NF, 1, initial_ffr);
+      gimple_seq_add_stmt (&header_seq, call);
+    }
+
   /* Emit all accumulated statements.  */
   add_preheader_seq (loop, preheader_seq);
   add_header_seq (loop, header_seq);

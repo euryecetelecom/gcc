@@ -514,6 +514,9 @@ typedef struct _loop_vec_info : public vec_info {
   /* True if have decided to use a fully-masked loop.  */
   bool fully_masked_p;
 
+  /* Is the loop executing using first faulting loads?  */
+  bool firstfaulting_execution;
+
   /* When we have grouped data accesses with gaps, we may introduce invalid
      memory accesses.  We peel the last iteration of the loop to prevent
      this.  */
@@ -575,6 +578,11 @@ typedef struct _loop_vec_info : public vec_info {
 
   /* A value equal to EXIT_TEST_MASK for use outside the loop.  */
   tree exit_mask;
+
+  /* In a vector loop that uses first-faulting loads, this is the
+     number of scalar iterations (bounded by VF) that didn't trigger
+     a fault, in both integer and mask form.  */
+  vec_niters_and_mask nonfaulting;
 
   /* In a speculative loop, these masks are used to control operations
      that cannot be speculatively executed.  */
@@ -641,6 +649,8 @@ typedef struct _loop_vec_info : public vec_info {
 #define LOOP_VINFO_SPECULATIVE_EXECUTION(L) (L)->speculative_execution
 #define LOOP_VINFO_EXIT_TEST_MASK(L)        (L)->exit_test_mask
 #define LOOP_VINFO_EXIT_MASK(L)             (L)->exit_mask
+#define LOOP_VINFO_FIRSTFAULTING_EXECUTION(L) (L)->firstfaulting_execution
+#define LOOP_VINFO_NONFAULTING(L)             (L)->nonfaulting
 #define LOOP_VINFO_NONSPECULATIVE(L)          (L)->nonspeculative
 #define LOOP_VINFO_NEEDS_NONSPECULATIVE_MASKS(L) \
   (!(L)->nonspeculative_masks.is_empty ())
@@ -1431,7 +1441,8 @@ static inline bool
 vect_use_loop_mask_for_alignment_p (loop_vec_info loop_vinfo)
 {
   return (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo)
-	  && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo));
+	  && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo)
+	  && !LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo));
 }
 
 /* Return the number of vectors of type VECTYPE that are needed to get
