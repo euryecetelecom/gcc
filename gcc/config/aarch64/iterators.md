@@ -417,6 +417,8 @@
     UNSPEC_COND_HS	; Used in aarch64-sve.md.
     UNSPEC_COND_HI	; Used in aarch64-sve.md.
     UNSPEC_COND_UO	; Used in aarch64-sve.md.
+    UNSPEC_LASTB	; Used in aarch64-sve.md.
+    UNSPEC_BRKA		; Used in aarch64-sve.md.
 ])
 
 ;; ------------------------------------------------------------------
