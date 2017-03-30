@@ -3546,6 +3546,14 @@ convert_plusminus_to_widen (gimple_stmt_iterator *gsi, gimple *stmt,
   return true;
 }
 
+/* gimple_fold callback that "valueizes" everything.  */
+
+static tree
+aggressive_valueize (tree val)
+{
+  return val;
+}
+
 /* Combine the multiplication at MUL_STMT with operands MULOP1 and MULOP2
    with uses in additions and subtractions to form fused multiply-add
    operations.  Returns true if successful and MUL_STMT should be removed.  */
@@ -3556,7 +3564,7 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
   tree mul_result = gimple_get_lhs (mul_stmt);
   tree type = TREE_TYPE (mul_result);
   gimple *use_stmt, *neguse_stmt;
-  gassign *fma_stmt;
+  gcall *fma_stmt;
   use_operand_p use_p;
   imm_use_iterator imm_iter;
 
@@ -3571,7 +3579,8 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
 
   /* If the target doesn't support it, don't generate it.  We assume that
      if fma isn't available then fms, fnma or fnms are not either.  */
-  if (optab_handler (fma_optab, TYPE_MODE (type)) == CODE_FOR_nothing)
+  optimization_type opt_type = bb_optimization_type (gimple_bb (mul_stmt));
+  if (!direct_internal_fn_supported_p (IFN_FMA, type, opt_type))
     return false;
 
   /* If the multiplication has zero uses, it is kept around probably because
@@ -3662,8 +3671,8 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
 	 that a mult / subtract pair.  */
       if (use_code == MINUS_EXPR && !negate_p
 	  && gimple_assign_rhs1 (use_stmt) == result
-	  && optab_handler (fms_optab, TYPE_MODE (type)) == CODE_FOR_nothing
-	  && optab_handler (fnma_optab, TYPE_MODE (type)) != CODE_FOR_nothing)
+	  && !direct_internal_fn_supported_p (IFN_FMS, type, opt_type)
+	  && direct_internal_fn_supported_p (IFN_FNMA, type, opt_type))
 	{
 	  tree rhs2 = gimple_assign_rhs2 (use_stmt);
 
@@ -3697,6 +3706,7 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
       enum tree_code use_code;
       tree addop, mulop1 = op1, result = mul_result;
       bool negate_p = false;
+      gimple_seq seq = NULL;
 
       if (is_gimple_debug (use_stmt))
 	continue;
@@ -3720,11 +3730,7 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
 	  addop = gimple_assign_rhs2 (use_stmt);
 	  /* a * b - c -> a * b + (-c)  */
 	  if (gimple_assign_rhs_code (use_stmt) == MINUS_EXPR)
-	    addop = force_gimple_operand_gsi (&gsi,
-					      build1 (NEGATE_EXPR,
-						      type, addop),
-					      true, NULL_TREE, true,
-					      GSI_SAME_STMT);
+	    addop = gimple_build (&seq, NEGATE_EXPR, type, addop);
 	}
       else
 	{
@@ -3735,15 +3741,18 @@ convert_mult_to_fma (gimple *mul_stmt, tree op1, tree op2)
 	}
 
       if (negate_p)
-	mulop1 = force_gimple_operand_gsi (&gsi,
-					   build1 (NEGATE_EXPR,
-						   type, mulop1),
-					   true, NULL_TREE, true,
-					   GSI_SAME_STMT);
+	mulop1 = gimple_build (&seq, NEGATE_EXPR, type, mulop1);
 
-      fma_stmt = gimple_build_assign (gimple_assign_lhs (use_stmt),
-				      FMA_EXPR, mulop1, op2, addop);
+      if (seq)
+	gsi_insert_seq_before (&gsi, seq, GSI_SAME_STMT);
+      fma_stmt = gimple_build_call_internal (IFN_FMA, 3, mulop1, op2, addop);
+      gimple_call_set_lhs (fma_stmt, gimple_assign_lhs (use_stmt));
+      gimple_call_set_nothrow (fma_stmt, !stmt_can_throw_internal (use_stmt));
       gsi_replace (&gsi, fma_stmt, true);
+      /* Valueize aggressively so that we generate FMS, FNMA and FNMS
+	 regardless of where the negation occurs.  */
+      if (fold_stmt (&gsi, aggressive_valueize))
+	update_stmt (gsi_stmt (gsi));
       widen_mul_stats.fmas_inserted++;
     }
 
