@@ -1985,17 +1985,17 @@ expand_simple_operations (tree expr, tree stop)
 	return expand_simple_operations (e, stop);
       else if (code == ADDR_EXPR)
 	{
-	  HOST_WIDE_INT offset;
+	  poly_int64 offset;
 	  tree base = get_addr_base_and_unit_offset (TREE_OPERAND (e, 0),
 						     &offset);
 	  if (base
 	      && TREE_CODE (base) == MEM_REF)
 	    {
 	      ee = expand_simple_operations (TREE_OPERAND (base, 0), stop);
+	      poly_offset_int new_offset = offset + mem_ref_offset (base);
 	      return fold_build2 (POINTER_PLUS_EXPR, TREE_TYPE (expr), ee,
-				  wide_int_to_tree (sizetype,
-						    mem_ref_offset (base)
-						    + offset));
+				  poly_offset_int_to_tree (sizetype,
+							   new_offset));
 	    }
 	}
 
