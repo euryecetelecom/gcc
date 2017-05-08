@@ -26,7 +26,7 @@
     if (GET_CODE (operands[0]) == MEM
 	&& !(aarch64_simd_imm_zero (operands[1], <MODE>mode)
 	     && aarch64_legitimate_address_p (<MODE>mode, operands[0],
-					      PARALLEL, 1)))
+					      ADDR_QUERY_LDP_STP, 1)))
       operands[1] = force_reg (<MODE>mode, operands[1]);
   "
 )
