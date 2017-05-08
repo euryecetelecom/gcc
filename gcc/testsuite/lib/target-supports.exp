@@ -3244,6 +3244,25 @@ proc check_effective_target_aarch64_little_endian { } {
     }]
 }
 
+# Return true if targetting AArch64 SVE and if the target system's
+# vectors have exactly BITS bits.
+proc aarch64_sve_hw_bits { bits } {
+    if { ![check_effective_target_aarch64_sve_hw] } {
+	return 0
+    }
+    return [check_runtime aarch64_sve${bits}_hw [subst {
+	int
+	main (void)
+	{
+	  int res;
+	  asm volatile ("cntd %0" : "=r" (res));
+	  if (res * 64 != $bits)
+	    __builtin_abort ();
+	  return 0;
+	}
+    }]]
+}
+
 # Return 1 if this is a compiler supporting ARC atomic operations
 proc check_effective_target_arc_atomic { } {
     return [check_no_compiler_messages arc_atomic assembly {
@@ -4167,6 +4186,22 @@ proc check_effective_target_arm_neon_hw { } {
 	  return (a != 1);
 	}
     } [add_options_for_arm_neon ""]]
+}
+
+proc check_effective_target_aarch64_sve_hw { } {
+    return [check_runtime aarch64_sve_hw_available {
+	int
+	main (void)
+	{
+	  unsigned long res;
+	  asm volatile ("ptrue p0.b");
+	  return 0;
+	}
+    }]
+}
+
+proc check_effective_target_aarch64_sve256_hw { } {
+    return [aarch64_sve_hw_bits 256]
 }
 
 proc check_effective_target_arm_neonv2_hw { } {
