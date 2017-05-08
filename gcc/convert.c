@@ -724,7 +724,7 @@ convert_to_integer_1 (tree type, tree expr, bool dofold)
 	 type corresponding to its mode, then do a nop conversion
 	 to TYPE.  */
       else if (TREE_CODE (type) == ENUMERAL_TYPE
-	       || outprec != GET_MODE_PRECISION (TYPE_MODE (type)))
+	       || may_ne (outprec, GET_MODE_PRECISION (TYPE_MODE (type))))
 	{
 	  expr = convert (lang_hooks.types.type_for_mode
 			  (TYPE_MODE (type), TYPE_UNSIGNED (type)), expr);

@@ -1583,7 +1583,8 @@ instrument_si_overflow (gimple_stmt_iterator gsi)
      Also punt on bit-fields.  */
   if (!INTEGRAL_TYPE_P (lhsinner)
       || TYPE_OVERFLOW_WRAPS (lhsinner)
-      || GET_MODE_BITSIZE (TYPE_MODE (lhsinner)) != TYPE_PRECISION (lhsinner))
+      || may_ne (GET_MODE_BITSIZE (TYPE_MODE (lhsinner)),
+		 TYPE_PRECISION (lhsinner)))
     return;
 
   switch (code)
