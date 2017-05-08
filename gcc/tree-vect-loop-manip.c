@@ -1136,8 +1136,9 @@ vect_build_loop_niters (loop_vec_info loop_vinfo, bool *new_var_p)
 
 static tree
 vect_gen_scalar_loop_niters (tree niters_prolog, int int_niters_prolog,
-			     int bound_prolog, int vfm1, int th,
-			     int *bound_scalar, bool check_profitability)
+			     int bound_prolog, poly_int64 vfm1, int th,
+			     poly_uint64 *bound_scalar,
+			     bool check_profitability)
 {
   tree type = TREE_TYPE (niters_prolog);
   tree niters = fold_build2 (PLUS_EXPR, type, niters_prolog,
@@ -1150,22 +1151,21 @@ vect_gen_scalar_loop_niters (tree niters_prolog, int int_niters_prolog,
 	 compute the maximum niters of scalar loop.  */
       th--;
       /* Peeling for constant times.  */
-      if (int_niters_prolog >= 0)
+      if (int_niters_prolog >= 0
+	  && ordered_p (int_niters_prolog + vfm1, th))
 	{
-	  *bound_scalar = (int_niters_prolog + vfm1 < th
-			    ? th
-			    : vfm1 + int_niters_prolog);
+	  *bound_scalar = ordered_max (int_niters_prolog + vfm1, th);
 	  return build_int_cst (type, *bound_scalar);
 	}
       /* Peeling for unknown times.  Note BOUND_PROLOG is the upper
 	 bound (inlcuded) of niters of prolog loop.  */
-      if (th >=  vfm1 + bound_prolog)
+      if (must_ge (th, vfm1 + bound_prolog))
 	{
 	  *bound_scalar = th;
 	  return build_int_cst (type, th);
 	}
       /* Need to do runtime comparison, but BOUND_SCALAR remains the same.  */
-      else if (th > vfm1)
+      else if (may_gt (th, vfm1))
 	return fold_build2 (MAX_EXPR, type, build_int_cst (type, th), niters);
     }
   return niters;
@@ -1184,10 +1184,13 @@ vect_gen_vector_loop_niters (loop_vec_info loop_vinfo, tree niters,
 			     tree *niters_vector_ptr, bool niters_no_overflow)
 {
   tree ni_minus_gap, var;
-  tree niters_vector, type = TREE_TYPE (niters);
-  int vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+  tree niters_vector;
+  tree vf;
+  tree type = TREE_TYPE (niters);
   edge pe = loop_preheader_edge (LOOP_VINFO_LOOP (loop_vinfo));
-  tree log_vf = build_int_cst (type, exact_log2 (vf));
+
+  vf = build_int_cst (TREE_TYPE (niters),
+		      LOOP_VINFO_VECT_FACTOR (loop_vinfo));
 
   /* If epilogue loop is required because of data accesses with gaps, we
      subtract one iteration from the total number of iterations here for
@@ -1214,15 +1217,14 @@ vect_gen_vector_loop_niters (loop_vec_info loop_vinfo, tree niters,
      (niters - vf) >> log2(vf) + 1 by using the fact that we know ratio
      will be at least one.  */
   if (niters_no_overflow)
-    niters_vector = fold_build2 (RSHIFT_EXPR, type, ni_minus_gap, log_vf);
+    niters_vector = fold_build2 (TRUNC_DIV_EXPR, type, ni_minus_gap, vf);
   else
-    niters_vector
-      = fold_build2 (PLUS_EXPR, type,
-		     fold_build2 (RSHIFT_EXPR, type,
-				  fold_build2 (MINUS_EXPR, type, ni_minus_gap,
-					       build_int_cst (type, vf)),
-				  log_vf),
-		     build_int_cst (type, 1));
+    niters_vector = fold_build2 (PLUS_EXPR, type,
+				 fold_build2 (TRUNC_DIV_EXPR, type,
+					      fold_build2 (MINUS_EXPR, type,
+							   ni_minus_gap, vf),
+					      vf),
+				 build_int_cst (type, 1));
 
   if (!is_gimple_val (niters_vector))
     {
@@ -1232,10 +1234,12 @@ vect_gen_vector_loop_niters (loop_vec_info loop_vinfo, tree niters,
       gsi_insert_seq_on_edge_immediate (pe, stmts);
       /* Peeling algorithm guarantees that vector loop bound is at least ONE,
 	 we set range information to make niters analyzer's life easier.  */
-      if (stmts != NULL)
-	set_range_info (niters_vector, VR_RANGE, build_int_cst (type, 1),
-			fold_build2 (RSHIFT_EXPR, type,
-				     TYPE_MAX_VALUE (type), log_vf));
+      if (stmts != NULL && TREE_CODE (vf) == INTEGER_CST)
+	{
+	  wide_int upper = wi::udiv_trunc (TYPE_MAX_VALUE (type), vf);
+	  set_range_info (niters_vector, VR_RANGE, build_int_cst (type, 1),
+			  wide_int_to_tree (type, upper));
+	}
     }
   *niters_vector_ptr = niters_vector;
 
@@ -1252,15 +1256,16 @@ vect_gen_vector_loop_niters_mult_vf (loop_vec_info loop_vinfo,
 				     tree niters_vector,
 				     tree *niters_vector_mult_vf_ptr)
 {
-  int vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+  tree vf;
   struct loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
   tree type = TREE_TYPE (niters_vector);
-  tree log_vf = build_int_cst (type, exact_log2 (vf));
   basic_block exit_bb = single_exit (loop)->dest;
 
+  vf = build_int_cst (type, LOOP_VINFO_VECT_FACTOR (loop_vinfo));
+
   gcc_assert (niters_vector_mult_vf_ptr != NULL);
-  tree niters_vector_mult_vf = fold_build2 (LSHIFT_EXPR, type,
-					    niters_vector, log_vf);
+  tree niters_vector_mult_vf = fold_build2 (MULT_EXPR, type,
+					    niters_vector, vf);
   if (!is_gimple_val (niters_vector_mult_vf))
     {
       tree var = create_tmp_var (type, "niters_vector_mult_vf");
@@ -1663,8 +1668,9 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
   tree type = TREE_TYPE (niters), guard_cond;
   basic_block guard_bb, guard_to;
   profile_probability prob_prolog, prob_vector, prob_epilog;
-  int bound_prolog = 0, bound_scalar = 0, bound = 0;
-  int vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+  int bound_prolog = 0;
+  poly_uint64 bound_scalar = 0;
+  int estimated_vf;
   int prolog_peeling = LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo);
   bool epilog_peeling = (LOOP_VINFO_PEELING_FOR_NITER (loop_vinfo)
 			 || LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo));
@@ -1673,11 +1679,12 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
     return NULL;
 
   prob_vector = profile_probability::guessed_always ().apply_scale (9, 10);
-  if ((vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo)) == 2)
-    vf = 3;
+  estimated_vf = estimated_poly_value (LOOP_VINFO_VECT_FACTOR (loop_vinfo));
+  if (estimated_vf == 2)
+    estimated_vf = 3;
   prob_prolog = prob_epilog = profile_probability::guessed_always ()
-			.apply_scale (vf - 1, vf);
-  vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+			.apply_scale (estimated_vf - 1, estimated_vf);
+  poly_uint64 vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
 
   struct loop *prolog, *epilog = NULL, *loop = LOOP_VINFO_LOOP (loop_vinfo);
   struct loop *first_loop = loop;
@@ -1697,13 +1704,15 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
   /* Skip to epilog if scalar loop may be preferred.  It's only needed
      when we peel for epilog loop and when it hasn't been checked with
      loop versioning.  */
-  bool skip_vector = (!LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
-		      && !LOOP_REQUIRES_VERSIONING (loop_vinfo));
+  bool skip_vector = ((!LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
+		       && !LOOP_REQUIRES_VERSIONING (loop_vinfo))
+		      || !vf.is_constant ());
   /* Epilog loop must be executed if the number of iterations for epilog
      loop is known at compile time, otherwise we need to add a check at
      the end of vector loop and skip to the end of epilog loop.  */
   bool skip_epilog = (prolog_peeling < 0
-		      || !LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo));
+		      || !LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
+		      || !vf.is_constant ());
   /* PEELING_FOR_GAPS is special because epilog loop must be executed.  */
   if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
     skip_epilog = false;
@@ -1722,8 +1731,10 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	 needs to be scaled back later.  */
       basic_block bb_before_loop = loop_preheader_edge (loop)->src;
       if (prob_vector.initialized_p ())
-      scale_bbs_frequencies (&bb_before_loop, 1, prob_vector);
-      scale_loop_profile (loop, prob_vector, bound);
+	{
+	  scale_bbs_frequencies (&bb_before_loop, 1, prob_vector);
+	  scale_loop_profile (loop, prob_vector, 0);
+	}
     }
 
   tree niters_prolog = build_int_cst (type, 0);
@@ -1895,15 +1906,20 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 
 	      scale_bbs_frequencies (&bb_before_epilog, 1, prob_epilog);
 	    }
-	  scale_loop_profile (epilog, prob_epilog, bound);
+	  scale_loop_profile (epilog, prob_epilog, 0);
 	}
       else
 	slpeel_update_phi_nodes_for_lcssa (epilog);
 
-      bound = LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo) ? vf - 1 : vf - 2;
-      /* We share epilog loop with scalar version loop.  */
-      bound = MAX (bound, bound_scalar - 1);
-      record_niter_bound (epilog, bound, false, true);
+      unsigned HOST_WIDE_INT bound1, bound2;
+      if (vf.is_constant (&bound1) && bound_scalar.is_constant (&bound2))
+	{
+	  bound1 -= LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo) ? 1 : 2;
+	  if (bound2)
+	    /* We share epilog loop with scalar version loop.  */
+	    bound1 = MAX (bound1, bound2 - 1);
+	  record_niter_bound (epilog, bound1, false, true);
+	}
 
       delete_update_ssa ();
       adjust_vec_debug_stmts ();
