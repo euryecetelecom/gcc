@@ -2203,7 +2203,7 @@ extern void get_full_rtx_cost (rtx, machine_mode, enum rtx_code, int,
 			       struct full_rtx_costs *);
 extern poly_int64 subreg_lsb (const_rtx);
 extern poly_int64 subreg_lsb_1 (machine_mode, machine_mode, poly_int64);
-extern poly_int64 subreg_size_offset_from_lsb (unsigned int, unsigned int,
+extern poly_int64 subreg_size_offset_from_lsb (poly_int64, poly_int64,
 					       poly_int64);
 extern bool read_modify_subreg_p (const_rtx);
 
@@ -2843,8 +2843,9 @@ extern rtx operand_subword (rtx, poly_int64, int, machine_mode);
 
 /* In emit-rtl.c */
 extern rtx operand_subword_force (rtx, poly_int64, machine_mode);
+extern machine_mode narrower_subreg_mode (machine_mode, machine_mode);
 extern int subreg_lowpart_p (const_rtx);
-extern poly_int64 subreg_size_lowpart_offset (unsigned int, unsigned int);
+extern poly_int64 subreg_size_lowpart_offset (poly_int64, poly_int64);
 
 /* Return true if a subreg of mode OUTERMODE would only access part of
    an inner register with mode INNERMODE.  The other bits of the inner
@@ -2926,7 +2927,7 @@ wider_subreg_mode (const_rtx x)
   return wider_subreg_mode (GET_MODE (x), GET_MODE (SUBREG_REG (x)));
 }
 
-extern poly_int64 subreg_size_highpart_offset (unsigned int, unsigned int);
+extern poly_int64 subreg_size_highpart_offset (poly_int64, poly_int64);
 
 /* Return the SUBREG_BYTE for an OUTERMODE highpart of an INNERMODE value.  */
 
