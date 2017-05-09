@@ -625,7 +625,9 @@ brig_code_entry_handler::get_tree_cst_for_hsa_operand
 	{
 	  /* In case of vector type elements (or sole vectors),
 	     create a vector ctor.  */
-	  size_t element_count = TYPE_VECTOR_SUBPARTS (tree_element_type);
+	  /* BRIG doesn't support variable-length vectors.  */
+	  size_t element_count
+	    = TYPE_VECTOR_SUBPARTS (tree_element_type).to_constant ();
 	  if (bytes_left < scalar_element_size * element_count)
 	    fatal_error (UNKNOWN_LOCATION,
 			 "Not enough bytes left for the initializer "
@@ -933,7 +935,9 @@ brig_code_entry_handler::expand_or_call_builtin (BrigOpcode16_t brig_opcode,
 
       tree_stl_vec result_elements;
 
-      for (size_t i = 0; i < TYPE_VECTOR_SUBPARTS (arith_type); ++i)
+      /* BRIG doesn't support variable-length vectors.  */
+      size_t element_count = TYPE_VECTOR_SUBPARTS (arith_type).to_constant ();
+      for (size_t i = 0; i < element_count; ++i)
 	{
 	  tree_stl_vec call_operands;
 	  if (operand0_elements.size () > 0)

@@ -1128,6 +1128,16 @@ vect_vf_for_cost (loop_vec_info loop_vinfo)
   return estimated_poly_value (LOOP_VINFO_VECT_FACTOR (loop_vinfo));
 }
 
+/* Estimate the number of elements in VEC_TYPE for costing purposes.
+   Pick a reasonable estimate if the exact number isn't known at
+   compile time.  */
+
+static inline unsigned int
+vect_nunits_for_cost (tree vec_type)
+{
+  return estimated_poly_value (TYPE_VECTOR_SUBPARTS (vec_type));
+}
+
 /* Source location */
 extern source_location vect_location;
 
