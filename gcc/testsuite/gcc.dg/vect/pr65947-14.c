@@ -1,3 +1,4 @@
+/* { dg-do run { xfail *-*-* } } */
 /* { dg-require-effective-target vect_condition } */
 
 #include "tree-vect.h"

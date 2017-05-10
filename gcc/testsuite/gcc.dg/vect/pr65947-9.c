@@ -46,4 +46,4 @@ main ()
 }
 
 /* { dg-final { scan-tree-dump-not "LOOP VECTORIZED" "vect" } } */
-/* { dg-final { scan-tree-dump "loop size is greater than data size" "vect" } } */
+/* { dg-final { scan-tree-dump "loop size is greater than data size" "vect" { xfail *-*-* } } } */
