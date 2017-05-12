@@ -65,6 +65,7 @@ enum vect_def_type {
 /* Define type of reduction.  */
 enum vect_reduction_type {
   TREE_CODE_REDUCTION,
+  STRICT_FP_REDUCTION,
   COND_REDUCTION,
   INTEGER_INDUC_COND_REDUCTION,
   CONST_COND_REDUCTION,
@@ -72,7 +73,8 @@ enum vect_reduction_type {
 };
 
 /* Any type of condition reduction.  */
-#define REDUCTION_IS_COND_REDUCTION_P(R) (R != TREE_CODE_REDUCTION)
+#define REDUCTION_IS_COND_REDUCTION_P(R) \
+  ((R) != TREE_CODE_REDUCTION && (R) != STRICT_FP_REDUCTION)
 
 /* Any standard condition reduction.  */
 #define REDUCTION_IS_FULL_COND_REDUCTION_P(R) (R == COND_REDUCTION	      \
@@ -1404,6 +1406,7 @@ extern void vect_model_load_cost (stmt_vec_info, int, vect_memory_access_type,
 extern unsigned record_stmt_cost (stmt_vector_for_cost *, int,
 				  enum vect_cost_for_stmt, stmt_vec_info,
 				  int, enum vect_cost_model_location);
+extern void vect_finish_replace_stmt (gimple *, gimple *);
 extern void vect_finish_stmt_generation (gimple *, gimple *,
                                          gimple_stmt_iterator *);
 extern bool vect_mark_stmts_to_be_vectorized (loop_vec_info);
