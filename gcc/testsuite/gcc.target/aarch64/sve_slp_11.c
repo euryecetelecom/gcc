@@ -41,9 +41,7 @@ TEST_ALL (VEC_PERM)
 /* { dg-final { scan-assembler-times {\tld1d\t} 3 } } */
 /* { dg-final { scan-assembler-times {\tst1d\t} 3 } } */
 /* { dg-final { scan-assembler-not {\tldr} } } */
-/* Currently we spill the predicate during the VIEW_CONVERT.  A later
-   patch fixes this.  */
-/* { dg-final { scan-assembler-not {\tstr} { xfail *-*-* } } } */
+/* { dg-final { scan-assembler-not {\tstr} } } */
 
 /* We should use the same WHILEs for both accesses.  */
 /* { dg-final { scan-assembler-times {\twhilelo\tp[0-7]\.b} 4 } } */
