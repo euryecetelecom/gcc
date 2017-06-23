@@ -352,6 +352,12 @@ typedef struct _loop_vec_info : public vec_info {
      the operations that can be executed speculatively.  */
   vec_loop_masks masks;
 
+  /* If we are using a loop mask to align memory addresses, this variable
+     contains the number of vector elements that we should skip in the
+     first iteration of the vector loop (i.e. the number of leading
+     elements that should be false in the first mask).  */
+  tree mask_skip_niters;
+
   /* Type of the variables to use in the WHILE_ULT call for fully-masked
      loops.  */
   tree mask_compare_type;
@@ -481,6 +487,7 @@ typedef struct _loop_vec_info : public vec_info {
 #define LOOP_VINFO_VECT_FACTOR(L)          (L)->vectorization_factor
 #define LOOP_VINFO_MAX_VECT_FACTOR(L)      (L)->max_vectorization_factor
 #define LOOP_VINFO_MASKS(L)                (L)->masks
+#define LOOP_VINFO_MASK_SKIP_NITERS(L)     (L)->mask_skip_niters
 #define LOOP_VINFO_MASK_COMPARE_TYPE(L)    (L)->mask_compare_type
 #define LOOP_VINFO_PTR_MASK(L)             (L)->ptr_mask
 #define LOOP_VINFO_LOOP_NEST(L)            (L)->loop_nest
@@ -1211,6 +1218,17 @@ unlimited_cost_model (loop_p loop)
   return (flag_vect_cost_model == VECT_COST_MODEL_UNLIMITED);
 }
 
+/* Return true if the loop described by LOOP_VINFO is fully-masked and
+   if the first iteration should use a partial mask in order to achieve
+   alignment.  */
+
+static inline bool
+vect_use_loop_mask_for_alignment_p (loop_vec_info loop_vinfo)
+{
+  return (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo)
+	  && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo));
+}
+
 /* Return the number of vectors of type VECTYPE that are needed to get
    NUNITS elements.  NUNITS should be based on the vectorization factor,
    so it is always a known multiple of the number of elements in VECTYPE.  */
@@ -1282,6 +1300,7 @@ extern void vect_loop_versioning (loop_vec_info, unsigned int, bool,
 				  poly_uint64);
 extern struct loop *vect_do_peeling (loop_vec_info, tree, tree,
 				     tree *, int, bool, bool);
+extern void vect_prepare_for_masked_peels (loop_vec_info);
 extern source_location find_loop_location (struct loop *);
 extern bool vect_can_advance_ivs_p (loop_vec_info);
 
@@ -1347,6 +1366,7 @@ extern tree vect_gen_perm_mask_checked (tree, unsigned int,
 					const unsigned char *);
 extern void optimize_mask_stores (struct loop*);
 extern gcall *vect_gen_while (tree, tree, tree);
+extern tree vect_gen_while_not (gimple_seq *, tree, tree, tree);
 
 /* In tree-vect-data-refs.c.  */
 extern bool vect_can_force_dr_alignment_p (const_tree, unsigned int);
