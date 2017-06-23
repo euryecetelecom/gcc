@@ -256,15 +256,31 @@ adjust_phi_and_debug_stmts (gimple *update_phi, edge e, tree new_def)
 
 /* Define one loop mask MASK from loop LOOP.  INIT_MASK is the value that
    the mask should have during the first iteration and NEXT_MASK is the
-   value that it should have on subsequent iterations.  */
+   value that it should have on subsequent iterations.  CAP_MASK, if
+   nonnull, is a cap that should be applied to each value of the mask
+   before the mask is used; add the statement that does to HEADER_SEQ.  */
 
 static void
-vect_set_loop_mask (struct loop *loop, tree mask, tree init_mask,
-		    tree next_mask)
+vect_set_loop_mask (struct loop *loop, gimple_seq *header_seq, tree mask,
+		    tree init_mask, tree next_mask, tree cap_mask)
 {
-  gphi *phi = create_phi_node (mask, loop->header);
+  tree mask_type = TREE_TYPE (mask);
+  tree uncapped_mask;
+  if (cap_mask)
+    uncapped_mask = make_temp_ssa_name (mask_type, NULL, "uncapped_mask");
+  else
+    uncapped_mask = mask;
+  gphi *phi = create_phi_node (uncapped_mask, loop->header);
   add_phi_arg (phi, init_mask, loop_preheader_edge (loop), UNKNOWN_LOCATION);
   add_phi_arg (phi, next_mask, loop_latch_edge (loop), UNKNOWN_LOCATION);
+
+  /* Apply the cap mask, if any.  */
+  if (cap_mask)
+    {
+      gimple *stmt = gimple_build_assign (mask, BIT_AND_EXPR,
+					  uncapped_mask, cap_mask);
+      gimple_seq_add_stmt (header_seq, stmt);
+    }
 }
 
 /* Add SEQ to the end of LOOP's preheader block.  */
@@ -357,12 +373,14 @@ vect_maybe_permute_loop_masks (gimple_seq *seq, rgroup_masks *dest_rgm,
 
 /* Helper for vect_iterate_loop_ntimes_masked.  Generate definitions for
    all the masks in RGM and return a mask that is nonzero when the loop
-   needs to iterate.  Add any new preheader statements to PREHEADER_SEQ.
-   Use LOOP_COND_GSI to insert code before the exit gcond.
+   needs to iterate.  Add any new preheader statements to PREHEADER_SEQ
+   and any new header statements to HEADER_SEQ.  Use LOOP_COND_GSI to
+   insert code before the exit gcond.
 
    RGM belongs to loop LOOP.  The loop originally iterated NSCALARITERS
    times and has been vectorized according to LOOP_VINFO.  Each iteration
-   of the vectorized loop handles VF iterations of the scalar loop.
+   of the vectorized loop handles CAPPED_VF iterations of the scalar loop,
+   where CAPPED_VF is bounded by the compile-time vectorization factor.
 
    If NSCALARITERS_SKIP is nonnull, the first iteration of the
    vectorized loop starts with NSCALARITERS_SKIP dummy iterations of the
@@ -377,7 +395,7 @@ vect_maybe_permute_loop_masks (gimple_seq *seq, rgroup_masks *dest_rgm,
    does not overflow.  However, MIGHT_WRAP_P says whether an induction
    variable that starts at 0 and has step:
 
-     VF * RGM->max_nscalars_per_iter
+     CAPPED_VF * RGM->max_nscalars_per_iter
 
    might overflow before hitting a value above:
 
@@ -389,8 +407,9 @@ vect_maybe_permute_loop_masks (gimple_seq *seq, rgroup_masks *dest_rgm,
 static tree
 vect_set_loop_masks_directly (struct loop *loop, loop_vec_info loop_vinfo,
 			      gimple_seq *preheader_seq,
+			      gimple_seq *header_seq,
 			      gimple_stmt_iterator loop_cond_gsi,
-			      rgroup_masks *rgm, tree vf,
+			      rgroup_masks *rgm, tree capped_vf,
 			      tree nscalariters, tree nscalariters_skip,
 			      bool might_wrap_p)
 {
@@ -408,7 +427,7 @@ vect_set_loop_masks_directly (struct loop *loop, loop_vec_info loop_vinfo,
      of the vector loop, and the number that it should skip during the
      first iteration of the vector loop.  */
   tree nscalars_total = nscalariters;
-  tree nscalars_step = vf;
+  tree nscalars_step = capped_vf;
   tree nscalars_skip = nscalariters_skip;
   if (nscalars_per_iter != 1)
     {
@@ -557,8 +576,8 @@ vect_set_loop_masks_directly (struct loop *loop, loop_vec_info loop_vinfo,
 	  else
 	    {
 	      /* FIRST_LIMIT is the maximum number of scalars handled by the
-		 first iteration of the vector loop.  Test the portion
-		 associated with this mask.  */
+		 first iteration of the vector loop (before any cap mask
+		 is applied).  Test the portion associated with this mask.  */
 	      start = bias_tree;
 	      end = first_limit;
 	    }
@@ -593,7 +612,18 @@ vect_set_loop_masks_directly (struct loop *loop, loop_vec_info loop_vinfo,
       gcall *call = vect_gen_while (next_mask, test_index, this_test_limit);
       gsi_insert_before (test_gsi, call, GSI_SAME_STMT);
 
-      vect_set_loop_mask (loop, mask, init_mask, next_mask);
+      /* Get the cap that needs to be ANDed with every mask.  */
+      tree cap_mask = LOOP_VINFO_CAP (loop_vinfo).mask;
+      if (use_capped_vf (loop_vinfo)
+	  && (!cap_mask || nscalars_per_iter != 1))
+	{
+	  cap_mask = make_temp_ssa_name (mask_type, NULL, "cap_mask");
+	  call = vect_gen_while (cap_mask, bias_tree, nscalars_step);
+	  gimple_seq_add_stmt (preheader_seq, call);
+	}
+
+      vect_set_loop_mask (loop, header_seq, mask, init_mask,
+			  next_mask, cap_mask);
     }
   return next_mask;
 }
@@ -678,16 +708,24 @@ vect_iterate_loop_ntimes_masked (struct loop *loop, loop_vec_info loop_vinfo,
      iterations.  */
   if (known_max_iters)
     {
-      /* Round the maximum in-range IV value down to the previous
-	 vector alignment boundary and then add an extra full
-	 iteration.  */
-      poly_uint64 vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
-      iv_limit = ((iv_limit - 1) & -(int) known_alignment (vf)) + max_vf;
+      if (use_capped_vf (loop_vinfo))
+	/* In the worst case the final vector iteration will handle a single
+	   scalar iteration, so we'll have up to MAX_VF - 1 inactive
+	   iterations.  */
+	iv_limit += max_vf - 1;
+      else
+	{
+	  /* Round the maximum in-range IV value down to the previous
+	     vector alignment boundary and then add an extra full
+	     iteration.  */
+	  poly_uint64 vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+	  iv_limit = ((iv_limit - 1) & -(int) known_alignment (vf)) + max_vf;
+	}
     }
 
-  /* Get the vectorization factor in tree form.  */
-  tree vf = build_int_cst (compare_type,
-			   LOOP_VINFO_VECT_FACTOR (loop_vinfo));
+  /* Convert the runtime vectorization factor to the appropriate type.  */
+  tree capped_vf = gimple_convert (&preheader_seq, compare_type,
+				   LOOP_VINFO_CAP (loop_vinfo).niters);
 
   /* Iterate over all the rgroups and fill in their masks.  We could use
      the first mask from any rgroup for the loop condition; here we
@@ -721,9 +759,9 @@ vect_iterate_loop_ntimes_masked (struct loop *loop, loop_vec_info loop_vinfo,
 
 	/* Set up all masks for this group.  */
 	test_mask = vect_set_loop_masks_directly (loop, loop_vinfo,
-						  &preheader_seq,
-						  loop_cond_gsi, rgm, vf,
-						  nscalariters,
+						  &preheader_seq, &header_seq,
+						  loop_cond_gsi, rgm,
+						  capped_vf, nscalariters,
 						  nscalariters_skip,
 						  might_wrap_p);
       }
@@ -1780,8 +1818,8 @@ vect_gen_vector_loop_niters (loop_vec_info loop_vinfo, tree niters,
   edge pe = loop_preheader_edge (LOOP_VINFO_LOOP (loop_vinfo));
   bool final_iter_may_be_partial = LOOP_VINFO_FULLY_MASKED_P (loop_vinfo);
 
-  vf = build_int_cst (TREE_TYPE (niters),
-		      LOOP_VINFO_VECT_FACTOR (loop_vinfo));
+  vf = fold_convert (TREE_TYPE (niters),
+		     LOOP_VINFO_CAP (loop_vinfo).niters);
 
   /* If epilogue loop is required because of data accesses with gaps, we
      subtract one iteration from the total number of iterations here for
@@ -1857,7 +1895,7 @@ vect_gen_vector_loop_niters_mult_vf (loop_vec_info loop_vinfo,
   tree type = TREE_TYPE (niters_vector);
   basic_block exit_bb = single_exit (loop)->dest;
 
-  vf = build_int_cst (type, LOOP_VINFO_VECT_FACTOR (loop_vinfo));
+  vf = fold_convert (type, LOOP_VINFO_CAP (loop_vinfo).niters);
 
   gcc_assert (niters_vector_mult_vf_ptr != NULL);
   tree niters_vector_mult_vf = fold_build2 (MULT_EXPR, type,
@@ -2267,6 +2305,8 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
   int bound_prolog = 0;
   poly_uint64 bound_scalar = 0;
   int estimated_vf;
+  tree vf = LOOP_VINFO_CAP (loop_vinfo).niters;
+  poly_uint64 max_vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
   int prolog_peeling = 0;
   if (!vect_use_loop_mask_for_alignment_p (loop_vinfo))
     prolog_peeling = LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo);
@@ -2283,7 +2323,6 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
     estimated_vf = 3;
   prob_prolog = prob_epilog = profile_probability::guessed_always ()
 			.apply_scale (estimated_vf - 1, estimated_vf);
-  poly_uint64 vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
 
   struct loop *prolog, *epilog = NULL, *loop = LOOP_VINFO_LOOP (loop_vinfo);
   struct loop *first_loop = loop;
@@ -2305,13 +2344,13 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
      loop versioning.  */
   bool skip_vector = ((!LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
 		       && !LOOP_REQUIRES_VERSIONING (loop_vinfo))
-		      || !vf.is_constant ());
+		      || TREE_CODE (vf) != INTEGER_CST);
   /* Epilog loop must be executed if the number of iterations for epilog
      loop is known at compile time, otherwise we need to add a check at
      the end of vector loop and skip to the end of epilog loop.  */
   bool skip_epilog = (prolog_peeling < 0
 		      || !LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
-		      || !vf.is_constant ());
+		      || TREE_CODE (vf) != INTEGER_CST);
   /* PEELING_FOR_GAPS is special because epilog loop must be executed.  */
   if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
     skip_epilog = false;
@@ -2396,9 +2435,11 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
       niters = vect_build_loop_niters (loop_vinfo, &new_var_p);
       /* It's guaranteed that vector loop bound before vectorization is at
 	 least VF, so set range information for newly generated var.  */
-      if (new_var_p)
+      poly_uint64 const_vf;
+      if (new_var_p && poly_tree_p (vf, &const_vf))
 	set_range_info (niters, VR_RANGE,
-			build_int_cst (type, vf), TYPE_MAX_VALUE (type));
+			build_int_cstu (type, constant_lower_bound (const_vf)),
+			TYPE_MAX_VALUE (type));
 
       /* Prolog iterates at most bound_prolog times, latch iterates at
 	 most bound_prolog - 1 times.  */
@@ -2437,7 +2478,9 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	  bool peel_for_gaps = LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo);
 	  tree t = vect_gen_scalar_loop_niters (niters_prolog, prolog_peeling,
 						bound_prolog,
-						peel_for_gaps ? vf : vf - 1,
+						peel_for_gaps
+						? max_vf
+						: max_vf - 1,
 						th, &bound_scalar,
 						check_profitability);
 	  /* Build guard against NITERSM1 since NITERS may overflow.  */
@@ -2511,7 +2554,7 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	slpeel_update_phi_nodes_for_lcssa (epilog);
 
       unsigned HOST_WIDE_INT bound1, bound2;
-      if (vf.is_constant (&bound1) && bound_scalar.is_constant (&bound2))
+      if (max_vf.is_constant (&bound1) && bound_scalar.is_constant (&bound2))
 	{
 	  bound1 -= LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo) ? 1 : 2;
 	  if (bound2)
