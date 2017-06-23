@@ -976,6 +976,8 @@ vect_fixup_reduc_chain (gimple *stmt)
   gcc_assert (!GROUP_FIRST_ELEMENT (vinfo_for_stmt (firstp))
 	      && GROUP_FIRST_ELEMENT (vinfo_for_stmt (stmt)));
   GROUP_SIZE (vinfo_for_stmt (firstp)) = GROUP_SIZE (vinfo_for_stmt (stmt));
+  GROUP_NUM_STMTS (vinfo_for_stmt (firstp))
+    = GROUP_NUM_STMTS (vinfo_for_stmt (stmt));
   do
     {
       stmtp = STMT_VINFO_RELATED_STMT (vinfo_for_stmt (stmt));
@@ -1150,7 +1152,8 @@ _loop_vec_info::_loop_vec_info (struct loop *loop_in)
     has_mask_store (false),
     scalar_loop (NULL),
     orig_loop_info (NULL),
-    vect_addr_base_htab (31)
+    vect_addr_base_htab (31),
+    gather_scatter_htab (31)
 {
   /* Create/Update stmt_info for all stmts in the loop.  */
   basic_block *body = get_loop_body (loop);
@@ -3010,6 +3013,7 @@ vect_is_slp_reduction (loop_vec_info loop_info, gimple *phi,
   first = GROUP_FIRST_ELEMENT (vinfo_for_stmt (current_stmt));
   LOOP_VINFO_REDUCTION_CHAINS (loop_info).safe_push (first);
   GROUP_SIZE (vinfo_for_stmt (first)) = size;
+  GROUP_NUM_STMTS (vinfo_for_stmt (first)) = size;
 
   return true;
 }
@@ -8735,11 +8739,13 @@ vect_transform_loop (loop_vec_info loop_vinfo)
             {
 	      if (STMT_VINFO_GROUPED_ACCESS (stmt_info))
 		{
-		  /* Interleaving. If IS_STORE is TRUE, the vectorization of the
-		     interleaving chain was completed - free all the stores in
-		     the chain.  */
+		  /* Remove all the stores once we've vectorized the
+		     whole group.  */
 		  gsi_next (&si);
-		  vect_remove_stores (GROUP_FIRST_ELEMENT (stmt_info));
+		  gimple *first_stmt = GROUP_FIRST_ELEMENT (stmt_info);
+		  if (GROUP_STORE_COUNT (vinfo_for_stmt (first_stmt))
+		      == GROUP_NUM_STMTS (vinfo_for_stmt (first_stmt)))
+		    vect_remove_stores (first_stmt);
 		}
 	      else
 		{
