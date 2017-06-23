@@ -505,6 +505,9 @@ typedef struct _loop_vec_info : public vec_info {
   /* Is the loop vectorizable? */
   bool vectorizable;
 
+  /* Is this a speculative loop?  */
+  bool speculative_execution;
+
   /* Records whether we still have the option of using a fully-masked loop.  */
   bool can_fully_mask_p;
 
@@ -565,6 +568,22 @@ typedef struct _loop_vec_info : public vec_info {
   /* A map from X to a precomputed gimple_val containing
      CAPPED_VECTORIZATION_FACTOR * X.  */
   hash_map<tree, tree> vf_mult_map;
+
+  /* In a speculative loop, this is the result of the exit comparison.
+     It is a vector mask with one element for each scalar iteration.  */
+  tree exit_test_mask;
+
+  /* A value equal to EXIT_TEST_MASK for use outside the loop.  */
+  tree exit_mask;
+
+  /* In a speculative loop, these masks are used to control operations
+     that cannot be speculatively executed.  */
+  vec_loop_masks nonspeculative_masks;
+
+  /* Statements in a speculative loop that depend on nonspeculative masks.
+     These statements can only be executed after the exit condition has
+     been evaluated.  */
+  gimple_seq nonspeculative_seq;
 } *loop_vec_info;
 
 /* Access Functions.  */
@@ -619,6 +638,14 @@ typedef struct _loop_vec_info : public vec_info {
 #define LOOP_VINFO_ADDR_CACHE(L)	   (L)->vect_addr_base_htab
 #define LOOP_VINFO_GATHER_SCATTER_CACHE(L) (L)->gather_scatter_htab
 #define LOOP_VINFO_VF_MULT_MAP(L)          (L)->vf_mult_map
+#define LOOP_VINFO_SPECULATIVE_EXECUTION(L) (L)->speculative_execution
+#define LOOP_VINFO_EXIT_TEST_MASK(L)        (L)->exit_test_mask
+#define LOOP_VINFO_EXIT_MASK(L)             (L)->exit_mask
+#define LOOP_VINFO_NONSPECULATIVE(L)          (L)->nonspeculative
+#define LOOP_VINFO_NEEDS_NONSPECULATIVE_MASKS(L) \
+  (!(L)->nonspeculative_masks.is_empty ())
+#define LOOP_VINFO_NONSPECULATIVE_MASKS(L)    (L)->nonspeculative_masks
+#define LOOP_VINFO_NONSPECULATIVE_SEQ(L)      (L)->nonspeculative_seq
 
 #define LOOP_REQUIRES_VERSIONING_FOR_ALIGNMENT(L)	\
   ((L)->may_misalign_stmts.length () > 0)
@@ -1591,6 +1618,8 @@ extern tree vect_get_new_ssa_name (tree, enum vect_var_kind,
 extern tree vect_create_addr_base_for_vector_ref (gimple *, gimple_seq *,
 						  tree, tree = NULL_TREE);
 extern tree get_copy_for_caching (tree);
+extern bool can_get_vect_data_ref_required_alignment (struct data_reference *,
+						      unsigned int *);
 extern unsigned int vect_data_ref_required_alignment (struct data_reference *);
 extern unsigned int vect_known_alignment_in_elements (gimple *);
 
@@ -1608,6 +1637,10 @@ extern void vect_record_loop_mask (loop_vec_info, vec_loop_masks *,
 				   unsigned int, tree);
 extern tree vect_get_loop_mask (gimple_stmt_iterator *, vec_loop_masks *,
 				unsigned int, tree, unsigned int);
+extern tree vect_get_load_mask (loop_vec_info, gimple_stmt_iterator *,
+				unsigned int, tree, unsigned int);
+extern tree vect_mask_type_for_speculation (loop_vec_info);
+extern tree vect_get_niters_from_mask (gimple_seq *, vec_niters_and_mask *);
 
 /* Drive for loop transformation stage.  */
 extern struct loop *vect_transform_loop (loop_vec_info);

@@ -371,6 +371,242 @@ vect_maybe_permute_loop_masks (gimple_seq *seq, rgroup_masks *dest_rgm,
   return false;
 }
 
+/* Helper for vect_set_speculative_masks.  Set the masks in RGM directly
+   from the corresponding scalar values.  RGM belongs to LOOP, which has
+   been vectorized according to LOOP_VINFO.  NSCALARITERS_SKIP is the
+   number of scalar iterations that we should skip during the first
+   iteration of the vector loop (because the start point has been
+   brought forward by that amount to achieve alignment).
+
+   Add any new preheader statements to PREHEADER_SEQ and any new header
+   statements to HEADER_SEQ.  */
+
+static void
+vect_set_speculative_masks_directly (struct loop *loop,
+				     loop_vec_info loop_vinfo,
+				     gimple_seq *preheader_seq,
+				     gimple_seq *header_seq,
+				     rgroup_masks *rgm,
+				     tree nscalariters_skip)
+{
+  /* It doesn't make sense to align for speculation when we have a
+     capped VF.  */
+  gcc_assert (!use_capped_vf (loop_vinfo));
+
+  tree compare_type = LOOP_VINFO_MASK_COMPARE_TYPE (loop_vinfo);
+  tree mask_type = rgm->mask_type;
+  poly_uint64 nscalars_per_mask = TYPE_VECTOR_SUBPARTS (mask_type);
+  unsigned int nscalars_per_iter = rgm->max_nscalars_per_iter;
+
+  tree nscalars_skip = nscalariters_skip;
+  if (nscalars_per_iter != 1)
+    {
+      tree factor = build_int_cst (compare_type, nscalars_per_iter);
+      nscalars_skip = gimple_build (preheader_seq, MULT_EXPR, compare_type,
+				    nscalars_skip, factor);
+    }
+
+  tree full_mask = build_minus_one_cst (mask_type);
+  tree mask;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (rgm->masks, i, mask)
+    {
+      /* Previous masks covered START scalars.  This mask covers the
+	 next batch.  */
+      tree start = build_int_cst (compare_type, nscalars_per_mask * i);
+      tree init_mask = vect_gen_while_not (preheader_seq, mask_type,
+					   start, nscalars_skip);
+
+      /* Always use a full mask for subsequent iterations of the loop.  */
+      vect_set_loop_mask (loop, header_seq, mask, init_mask,
+			  full_mask, NULL_TREE);
+    }
+}
+
+/* Set up the controlling masks for LOOP, which is a speculative loop that
+   has been vectorized according to LOOP_VINFO.  */
+
+static void
+vect_set_speculative_masks (struct loop *loop, loop_vec_info loop_vinfo)
+{
+  gimple_seq preheader_seq = NULL;
+  gimple_seq header_seq = NULL;
+
+  vec_loop_masks *masks = &LOOP_VINFO_MASKS (loop_vinfo);
+  tree nscalariters_skip = LOOP_VINFO_MASK_SKIP_NITERS (loop_vinfo);
+  rgroup_masks *rgm;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (*masks, i, rgm)
+    if (!rgm->masks.is_empty ())
+      {
+	/* We shouldn't be using masks if there are no elements to skip
+	   on the first iteration.  */
+	gcc_assert (nscalariters_skip != NULL_TREE);
+
+	/* First try using permutes.  */
+	unsigned int nmasks = i + 1;
+	if ((nmasks & 1) == 0)
+	  {
+	    rgroup_masks *half_rgm = &(*masks)[nmasks / 2 - 1];
+	    if (!half_rgm->masks.is_empty ()
+		&& vect_maybe_permute_loop_masks (&header_seq, rgm, half_rgm))
+	      continue;
+	  }
+
+	vect_set_speculative_masks_directly (loop, loop_vinfo,
+					     &preheader_seq, &header_seq,
+					     rgm, nscalariters_skip);
+      }
+
+  /* Emit all accumulated statements.  */
+  add_preheader_seq (loop, preheader_seq);
+  add_header_seq (loop, header_seq);
+}
+
+/* RGM belongs to the nonspeculative masks of LOOP_VINFO.  Set up the masks
+   in RGM so that the active bits corresponding to the first NSCALARITERS
+   scalar iterations are true and every other bit is false.  Add any new
+   statements before GSI.  */
+
+static void
+vect_set_nonspeculative_masks_directly (loop_vec_info loop_vinfo,
+					gimple_stmt_iterator *gsi,
+					rgroup_masks *rgm, tree nscalariters)
+{
+  tree compare_type = LOOP_VINFO_MASK_COMPARE_TYPE (loop_vinfo);
+  tree mask_type = rgm->mask_type;
+  poly_uint64 nscalars_per_mask = TYPE_VECTOR_SUBPARTS (mask_type);
+  unsigned int nscalars_per_iter = rgm->max_nscalars_per_iter;
+
+  /* Calculate the number of scalars covered by the rgroup.  */
+  gimple_seq seq = NULL;
+  tree nscalars = nscalariters;
+  if (nscalars_per_iter != 1)
+    nscalars = gimple_build (&seq, MULT_EXPR, compare_type, nscalars,
+			     build_int_cst (compare_type, nscalars_per_iter));
+  if (seq)
+    gsi_insert_seq_before (gsi, seq, GSI_SAME_STMT);
+
+  tree mask;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (rgm->masks, i, mask)
+    {
+      /* Previous masks covered START scalars.  This mask covers the
+	 next batch.  */
+      tree start = build_int_cst (compare_type, nscalars_per_mask * i);
+      if (LOOP_VINFO_MASK_SKIP_NITERS (loop_vinfo))
+	{
+	  /* First get a mask that ignores whether bits are active.  */
+	  tree temp = make_ssa_name (mask_type);
+	  gcall *call = vect_gen_while (temp, start, nscalars);
+	  gsi_insert_before (gsi, call, GSI_SAME_STMT);
+
+	  /* Now AND the result with the active lanes.  */
+	  tree active
+	    = vect_get_loop_mask (gsi, &LOOP_VINFO_MASKS (loop_vinfo),
+				  rgm->masks.length (), mask_type, i);
+	  gassign *assign = gimple_build_assign (mask, BIT_AND_EXPR,
+						 temp, active);
+	  gsi_insert_before (gsi, assign, GSI_SAME_STMT);
+	}
+      else
+	{
+	  /* All lanes are active.  */
+	  gcall *call = vect_gen_while (mask, start, nscalars);
+	  gsi_insert_before (gsi, call, GSI_SAME_STMT);
+	}
+    }
+}
+
+/* Set MASK to the mask of active elements up to and including the
+   first iteration for which the exit condition of LOOP_VINFO is true.
+   Insert any new statements before GSI.  ALL_ACTIVE_P is true if we
+   should treat all elements as active, false if we should get the
+   mask of active elements from the main loop mask.  */
+
+static void
+vect_add_break_after (loop_vec_info loop_vinfo, gimple_stmt_iterator *gsi,
+		      tree mask, bool all_active_p)
+{
+  tree mask_type = TREE_TYPE (mask);
+
+  tree active;
+  if (all_active_p)
+    active = build_minus_one_cst (mask_type);
+  else
+    active = vect_get_loop_mask (gsi, &LOOP_VINFO_MASKS (loop_vinfo),
+				 1, mask_type, 0);
+
+  /* Break the mask after the first true exit condition.  */
+  tree exit_mask = LOOP_VINFO_EXIT_TEST_MASK (loop_vinfo);
+  gcall *call = gimple_build_call_internal (IFN_BREAK_AFTER, 2,
+					    active, exit_mask);
+  gimple_call_set_lhs (call, mask);
+  gsi_insert_before (gsi, call, GSI_SAME_STMT);
+}
+
+/* Set up the nonspeculative masks in LOOP_VINFO.  Emit any new statements
+   before GSI.  */
+
+static void
+vect_set_nonspeculative_masks (loop_vec_info loop_vinfo,
+			       gimple_stmt_iterator *gsi)
+{
+  vec_niters_and_mask nim;
+  vec_loop_masks *masks = &LOOP_VINFO_NONSPECULATIVE_MASKS (loop_vinfo);
+  tree compare_type = LOOP_VINFO_MASK_COMPARE_TYPE (loop_vinfo);
+  tree niters = NULL_TREE;
+  rgroup_masks *rgm;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (*masks, i, rgm)
+    if (!rgm->masks.is_empty ())
+      {
+	unsigned int nmasks = i + 1;
+
+	/* Try to set the mask directly with a BREAK_AFTER.  */
+	if (nmasks == 1 && rgm->max_nscalars_per_iter == 1)
+	  {
+	    /* All elements are active unless we're peeling for
+	       alignment.  */
+	    vect_add_break_after (loop_vinfo, gsi, rgm->masks[0],
+				  !LOOP_VINFO_MASK_SKIP_NITERS (loop_vinfo));
+	    continue;
+	  }
+
+	/* Try using permutes.  */
+	if ((nmasks & 1) == 0)
+	  {
+	    gimple_seq seq = NULL;
+	    rgroup_masks *half_rgm = &(*masks)[nmasks / 2 - 1];
+	    if (!half_rgm->masks.is_empty ()
+		&& vect_maybe_permute_loop_masks (&seq, rgm, half_rgm))
+	      {
+		gsi_insert_seq_before (gsi, seq, GSI_SAME_STMT);
+		continue;
+	      }
+	  }
+
+	if (niters == NULL_TREE)
+	  {
+	    /* Get the mask of elements up to and including the first
+	       iteration for which the exit condition is true.
+	       Include any inactive starting elements at this stage.  */
+	    tree mask_type = vect_mask_type_for_speculation (loop_vinfo);
+	    nim.mask = make_ssa_name (mask_type);
+	    vect_add_break_after (loop_vinfo, gsi, nim.mask, true);
+
+	    /* Convert the mask to a scalar count, then convert the
+	       sizetype result to the mask comparison type.  */
+	    gimple_seq seq = NULL;
+	    niters = vect_get_niters_from_mask (&seq, &nim);
+	    niters = gimple_convert (&seq, compare_type, niters);
+	    if (seq)
+	      gsi_insert_seq_before (gsi, seq, GSI_SAME_STMT);
+	  }
+	vect_set_nonspeculative_masks_directly (loop_vinfo, gsi, rgm, niters);
+      }
+}
+
 /* Helper for vect_iterate_loop_ntimes_masked.  Generate definitions for
    all the masks in RGM and return a mask that is nonzero when the loop
    needs to iterate.  Add any new preheader statements to PREHEADER_SEQ
@@ -824,18 +1060,38 @@ slpeel_iterate_loop_ntimes_unmasked (struct loop *loop, tree niters,
    the vectorization and NSCALARITERS is the number of times that the
    original scalar loop iterated.
 
-   Finalize the loop by making it iterate NITERS times.
+   If LOOP_VINFO is null or if it describes a normal non-speculative loop,
+   LOOP should iterate NTIERS times.
+
    Assumption: the exit-condition of LOOP is the last stmt in the loop.  */
 
 void
 slpeel_finalize_loop_iterations (struct loop *loop, loop_vec_info loop_vinfo,
 				 tree niters, tree nscalariters)
 {
-  gcond *cond_stmt;
+  gcond *cond_stmt = NULL;
   gcond *orig_cond = get_loop_exit_condition (loop);
   gimple_stmt_iterator loop_cond_gsi = gsi_for_stmt (orig_cond);
+  bool masked_p = (loop_vinfo && LOOP_VINFO_FULLY_MASKED_P (loop_vinfo));
+  bool speculation_p
+    = (loop_vinfo && LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo));
 
-  if (loop_vinfo && LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+  if (speculation_p)
+    {
+      /* Set the masks that control statements that cannot be speculatively
+	 executed.  */
+      vect_set_nonspeculative_masks (loop_vinfo, &loop_cond_gsi);
+
+      /* ...then add the statements themselves.  */
+      gimple_seq late_seq = LOOP_VINFO_NONSPECULATIVE_SEQ (loop_vinfo);
+      if (late_seq)
+	gsi_insert_seq_before (&loop_cond_gsi, late_seq, GSI_SAME_STMT);
+
+      /* Set up the masks that control the speculative statements.  */
+      if (masked_p)
+	vect_set_speculative_masks (loop, loop_vinfo);
+    }
+  else if (masked_p)
     cond_stmt = vect_iterate_loop_ntimes_masked (loop, loop_vinfo,
 						 niters, nscalariters,
 						 loop_cond_gsi);
@@ -843,19 +1099,23 @@ slpeel_finalize_loop_iterations (struct loop *loop, loop_vec_info loop_vinfo,
     cond_stmt = slpeel_iterate_loop_ntimes_unmasked (loop, niters,
 						     loop_cond_gsi);
 
-  /* Remove old loop exit test.  */
-  gsi_remove (&loop_cond_gsi, true);
-  free_stmt_vec_info (orig_cond);
+  if (!speculation_p)
+    {
+      /* Remove old loop exit test.  */
+      gsi_remove (&loop_cond_gsi, true);
+      free_stmt_vec_info (orig_cond);
+    }
 
-  if (dump_enabled_p ())
+  if (dump_enabled_p () && cond_stmt)
     {
       dump_printf_loc (MSG_NOTE, vect_location, "New loop exit condition: ");
       dump_gimple_stmt (MSG_NOTE, TDF_SLIM, cond_stmt, 0);
     }
 
   /* Record the number of latch iterations.  */
-  loop->nb_iterations = fold_build2 (MINUS_EXPR, TREE_TYPE (niters), niters,
-				     build_int_cst (TREE_TYPE (niters), 1));
+  if (!speculation_p)
+    loop->nb_iterations = fold_build2 (MINUS_EXPR, TREE_TYPE (niters), niters,
+				       build_int_cst (TREE_TYPE (niters), 1));
 }
 
 /* Helper routine of slpeel_tree_duplicate_loop_to_edge_cfg.
@@ -1545,13 +1805,15 @@ vect_gen_prolog_loop_niters (loop_vec_info loop_vinfo,
 {
   struct data_reference *dr = LOOP_VINFO_UNALIGNED_DR (loop_vinfo);
   tree var;
-  tree niters_type = TREE_TYPE (LOOP_VINFO_NITERS (loop_vinfo));
   gimple_seq stmts = NULL, new_stmts = NULL;
   tree iters, iters_name;
   gimple *dr_stmt = DR_STMT (dr);
   stmt_vec_info stmt_info = vinfo_for_stmt (dr_stmt);
   tree vectype = STMT_VINFO_VECTYPE (stmt_info);
   unsigned int target_align = DR_TARGET_ALIGNMENT (dr);
+  tree niters_type = (LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo)
+		      ? size_type_node
+		      : TREE_TYPE (LOOP_VINFO_NITERS (loop_vinfo)));
 
   if (LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo) > 0)
     {
@@ -1731,6 +1993,12 @@ vect_prepare_for_masked_peels (loop_vec_info loop_vinfo)
 tree
 vect_build_loop_niters (loop_vec_info loop_vinfo, bool *new_var_p)
 {
+  if (!LOOP_VINFO_NITERS (loop_vinfo))
+    {
+      gcc_assert (LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo));
+      return NULL;
+    }
+
   tree ni = unshare_expr (LOOP_VINFO_NITERS (loop_vinfo));
   if (TREE_CODE (ni) == INTEGER_CST)
     return ni;
