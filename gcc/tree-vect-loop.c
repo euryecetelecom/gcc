@@ -2446,16 +2446,6 @@ start_over:
     }
 
   if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
-      && LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
-    {
-      LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
-      if (dump_enabled_p ())
-	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
-			 "Can't use a fully-masked loop because peeling for"
-			 " gaps is required.\n");
-    }
-
-  if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
       && !LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo)
       && LOOP_VINFO_SPECULATIVE_EXECUTION (loop_vinfo)
       && !LOOP_VINFO_FIRSTFAULTING_EXECUTION (loop_vinfo)
@@ -4005,6 +3995,23 @@ vect_estimate_min_profitable_iters (loop_vec_info loop_vinfo,
     {
       peel_iters_prologue = 0;
       peel_iters_epilogue = 0;
+
+      if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
+	{
+	  /* We need to peel exactly one iteration.  */
+	  peel_iters_epilogue += 1;
+	  stmt_info_for_cost *si;
+	  int j;
+	  FOR_EACH_VEC_ELT (LOOP_VINFO_SCALAR_ITERATION_COST (loop_vinfo),
+			    j, si)
+	    {
+	      struct _stmt_vec_info *stmt_info
+		= si->stmt ? vinfo_for_stmt (si->stmt) : NULL;
+	      (void) add_stmt_cost (target_cost_data, si->count,
+				    si->kind, stmt_info, si->misalign,
+				    vect_epilogue);
+	    }
+	}
     }
   else if (npeel < 0)
     {
@@ -8817,8 +8824,10 @@ vect_transform_loop (loop_vec_info loop_vinfo)
   LOOP_VINFO_NITERS_UNCHANGED (loop_vinfo) = niters;
   tree nitersm1 = unshare_expr (LOOP_VINFO_NITERSM1 (loop_vinfo));
   bool niters_no_overflow = loop_niters_no_overflow (loop_vinfo);
-  epilogue = vect_do_peeling (loop_vinfo, niters, nitersm1, &niters_vector, th,
-			      check_profitability, niters_no_overflow);
+  tree niters_minus_gap = NULL_TREE;
+  epilogue = vect_do_peeling (loop_vinfo, niters, nitersm1, &niters_minus_gap,
+			      &niters_vector, th, check_profitability,
+			      niters_no_overflow);
 
   bool final_iter_may_be_partial = LOOP_VINFO_FULLY_MASKED_P (loop_vinfo);
   if (niters_vector == NULL_TREE
@@ -8827,6 +8836,8 @@ vect_transform_loop (loop_vec_info loop_vinfo)
       gcc_assert (!LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo));
       if (LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo) && must_eq (lowest_vf, vf))
 	{
+	  niters_minus_gap = LOOP_VINFO_NITERS (loop_vinfo);
+
 	  wide_int niters_vector_val
 	    = (final_iter_may_be_partial
 	       ? wi::udiv_ceil (LOOP_VINFO_NITERS (loop_vinfo),
@@ -8838,8 +8849,8 @@ vect_transform_loop (loop_vec_info loop_vinfo)
 				niters_vector_val);
 	}
       else
-	vect_gen_vector_loop_niters (loop_vinfo, niters, &niters_vector,
-				     niters_no_overflow);
+	vect_gen_vector_loop_niters (loop_vinfo, niters, &niters_minus_gap,
+				     &niters_vector, niters_no_overflow);
     }
 
   /* 1) Make sure the loop header has exactly two entries
@@ -9142,7 +9153,8 @@ vect_transform_loop (loop_vec_info loop_vinfo)
       add_phi_arg (new_phi, imask, single_exit (loop), UNKNOWN_LOCATION);
     }
 
-  slpeel_finalize_loop_iterations (loop, loop_vinfo, niters_vector, niters);
+  slpeel_finalize_loop_iterations (loop, loop_vinfo, niters_vector,
+				   niters_minus_gap);
 
   unsigned int assumed_vf = vect_vf_for_cost (loop_vinfo);
   scale_profile_for_vect_loop (loop, assumed_vf);

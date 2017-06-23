@@ -40,3 +40,8 @@ TEST (test)
 /* { dg-final { scan-assembler-times {\tstr\ts} 1 } } */
 /* { dg-final { scan-assembler-times {\tldr\td} 2 } } */
 /* { dg-final { scan-assembler-times {\tstr\td} 1 } } */
+
+/* Each function should have three branches: one directly to the exit
+   (n <= 0), one to the single scalar epilogue iteration (n == 1),
+   and one branch-back for the vectorized loop.  */
+/* { dg-final { scan-assembler-times {\tb[a-z]+\t} 12 } } */

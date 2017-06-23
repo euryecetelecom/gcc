@@ -1515,7 +1515,7 @@ struct loop *slpeel_tree_duplicate_loop_to_edge_cfg (struct loop *,
 extern void vect_loop_versioning (loop_vec_info, unsigned int, bool,
 				  poly_uint64);
 extern struct loop *vect_do_peeling (loop_vec_info, tree, tree,
-				     tree *, int, bool, bool);
+				     tree *, tree *, int, bool, bool);
 extern void vect_prepare_for_masked_peels (loop_vec_info);
 extern source_location find_loop_location (struct loop *);
 extern bool vect_can_advance_ivs_p (loop_vec_info);
@@ -1641,7 +1641,8 @@ extern gimple *vect_force_simple_reduction (loop_vec_info, gimple *,
 /* Drive for loop analysis stage.  */
 extern loop_vec_info vect_analyze_loop (struct loop *, loop_vec_info);
 extern tree vect_build_loop_niters (loop_vec_info, bool * = NULL);
-extern void vect_gen_vector_loop_niters (loop_vec_info, tree, tree *, bool);
+extern void vect_gen_vector_loop_niters (loop_vec_info, tree, tree *,
+					 tree *, bool);
 extern tree vect_halve_mask_nunits (tree);
 extern tree vect_double_mask_nunits (tree);
 extern void vect_record_loop_mask (loop_vec_info, vec_loop_masks *,
