@@ -30,6 +30,7 @@ along with GCC; see the file COPYING3.  If not see
 
      DEF_INTERNAL_FN (NAME, FLAGS, FNSPEC)
      DEF_INTERNAL_OPTAB_FN (NAME, FLAGS, OPTAB, TYPE)
+     DEF_INTERNAL_COND_OPTAB_FN (NAME, FLAGS, OPTAB, TYPE)
      DEF_INTERNAL_FLT_FN (NAME, FLAGS, OPTAB, TYPE)
      DEF_INTERNAL_INT_FN (NAME, FLAGS, OPTAB, TYPE)
 
@@ -50,6 +51,14 @@ along with GCC; see the file COPYING3.  If not see
    - mask_store: currently just maskstore
    - store_lanes: currently just vec_store_lanes
    - mask_store_lanes: currently just vec_mask_store_lanes
+
+   - binary: a normal binary optab, such as add<mode>3
+
+   - cond_binary: a conditional binary optab, such as add<mode>cc
+
+   DEF_INTERNAL_COND_OPTAB_FN defines a conditional function COND_<NAME>,
+   with optab cond_<OPTAB> and type cond_<TYPE>.  All these functions
+   are predicated and take the predicate as the first argument.
 
    DEF_INTERNAL_FLT_FN is like DEF_INTERNAL_OPTAB_FN, but in addition,
    the function implements the computational part of a built-in math
@@ -77,6 +86,9 @@ along with GCC; see the file COPYING3.  If not see
   DEF_INTERNAL_FN (NAME, FLAGS | ECF_LEAF, NULL)
 #endif
 
+#define DEF_INTERNAL_COND_OPTAB_FN(NAME, FLAGS, OPTAB, TYPE) \
+  DEF_INTERNAL_OPTAB_FN (COND_##NAME, FLAGS, cond_##OPTAB, cond_##TYPE)
+
 #ifndef DEF_INTERNAL_FLT_FN
 #define DEF_INTERNAL_FLT_FN(NAME, FLAGS, OPTAB, TYPE) \
   DEF_INTERNAL_OPTAB_FN (NAME, FLAGS, OPTAB, TYPE)
@@ -97,6 +109,8 @@ DEF_INTERNAL_OPTAB_FN (STORE_LANES, ECF_CONST, vec_store_lanes, store_lanes)
 DEF_INTERNAL_OPTAB_FN (MASK_STORE_LANES, 0,
 		       vec_mask_store_lanes, mask_store_lanes)
 
+DEF_INTERNAL_OPTAB_FN (WHILE_ULT, ECF_CONST | ECF_NOTHROW, while_ult, while)
+
 DEF_INTERNAL_OPTAB_FN (VEC_INTERLEAVE_HI, ECF_CONST | ECF_NOTHROW,
 		       vec_interleave_hi, binary)
 DEF_INTERNAL_OPTAB_FN (VEC_INTERLEAVE_LO, ECF_CONST | ECF_NOTHROW,
@@ -109,6 +123,16 @@ DEF_INTERNAL_OPTAB_FN (VEC_REVERSE, ECF_CONST | ECF_NOTHROW,
 		       vec_reverse, unary)
 DEF_INTERNAL_OPTAB_FN (VEC_SHL_INSERT, ECF_CONST | ECF_NOTHROW,
 		       vec_shl_insert, binary)
+
+DEF_INTERNAL_COND_OPTAB_FN (ADD, ECF_CONST, add, binary)
+DEF_INTERNAL_COND_OPTAB_FN (SUB, ECF_CONST, sub, binary)
+DEF_INTERNAL_COND_OPTAB_FN (SMIN, ECF_CONST, smin, binary)
+DEF_INTERNAL_COND_OPTAB_FN (SMAX, ECF_CONST, smax, binary)
+DEF_INTERNAL_COND_OPTAB_FN (UMIN, ECF_CONST, umin, binary)
+DEF_INTERNAL_COND_OPTAB_FN (UMAX, ECF_CONST, umax, binary)
+DEF_INTERNAL_COND_OPTAB_FN (AND, ECF_CONST | ECF_NOTHROW, and, binary)
+DEF_INTERNAL_COND_OPTAB_FN (IOR, ECF_CONST | ECF_NOTHROW, ior, binary)
+DEF_INTERNAL_COND_OPTAB_FN (XOR, ECF_CONST | ECF_NOTHROW, xor, binary)
 
 DEF_INTERNAL_OPTAB_FN (RSQRT, ECF_CONST, rsqrt, unary)
 
@@ -249,5 +273,6 @@ DEF_INTERNAL_FN (DIVMOD, ECF_CONST | ECF_LEAF, NULL)
 
 #undef DEF_INTERNAL_INT_FN
 #undef DEF_INTERNAL_FLT_FN
+#undef DEF_INTERNAL_COND_OPTAB_FN
 #undef DEF_INTERNAL_OPTAB_FN
 #undef DEF_INTERNAL_FN

@@ -52,6 +52,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-if-conv.h"
 #include "internal-fn.h"
 
+/* For lang_hooks.types.type_for_mode.  */
+#include "langhooks.h"
+
 /* Loop Vectorization Pass.
 
    This pass tries to vectorize loops.
@@ -1129,12 +1132,15 @@ _loop_vec_info::_loop_vec_info (struct loop *loop_in)
     th (0),
     versioning_threshold (0),
     vectorization_factor (0),
+    mask_compare_type (NULL_TREE),
     unaligned_dr (NULL),
     peeling_for_alignment (0),
     ptr_mask (0),
     slp_unrolling_factor (1),
     single_scalar_iteration_cost (0),
     vectorizable (false),
+    can_fully_mask_p (true),
+    fully_masked_p (false),
     peeling_for_gaps (false),
     peeling_for_niter (false),
     operands_swapped (false),
@@ -1176,6 +1182,17 @@ _loop_vec_info::_loop_vec_info (struct loop *loop_in)
   gcc_assert (nbbs == loop->num_nodes);
 }
 
+/* Free all levels of MASKS.  */
+
+void
+release_vec_loop_masks (vec_loop_masks *masks)
+{
+  rgroup_masks *rgm;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (*masks, i, rgm)
+    rgm->masks.release ();
+  masks->release ();
+}
 
 /* Free all memory used by the _loop_vec_info, as well as all the
    stmt_vec_info structs of all the stmts in the loop.  */
@@ -1241,9 +1258,97 @@ _loop_vec_info::~_loop_vec_info ()
 
   free (bbs);
 
+  release_vec_loop_masks (&masks);
+
   loop->aux = NULL;
 }
 
+/* Return true if we can use CMP_TYPE as the comparison type to produce
+   all masks required to fully-mask LOOP_VINFO.  */
+
+static bool
+can_produce_all_loop_masks_p (loop_vec_info loop_vinfo, tree cmp_type)
+{
+  rgroup_masks *rgm;
+  unsigned int i;
+  FOR_EACH_VEC_ELT (LOOP_VINFO_MASKS (loop_vinfo), i, rgm)
+    if (rgm->mask_type != NULL_TREE
+	&& !direct_internal_fn_supported_p (IFN_WHILE_ULT,
+					    cmp_type, rgm->mask_type,
+					    OPTIMIZE_FOR_SPEED))
+      return false;
+  return true;
+}
+
+/* Calculate the maximum number of scalars per iteration for every
+   rgroup in LOOP_VINFO.  */
+
+static unsigned int
+vect_get_max_nscalars_per_iter (loop_vec_info loop_vinfo)
+{
+  unsigned int res = 1;
+  unsigned int i;
+  rgroup_masks *rgm;
+  FOR_EACH_VEC_ELT (LOOP_VINFO_MASKS (loop_vinfo), i, rgm)
+    res = MAX (res, rgm->max_nscalars_per_iter);
+  return res;
+}
+
+/* Each statement in LOOP_VINFO can be masked where necessary.  Check
+   whether we can actually generate the masks required.  Return true if so,
+   storing the type of the scalar IV in LOOP_VINFO_MASK_COMPARE_TYPE.  */
+
+static bool
+vect_verify_full_masking (loop_vec_info loop_vinfo)
+{
+  struct loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
+  unsigned int min_ni_width;
+
+  /* Get the maximum number of iterations that is representable
+     in the counter type.  */
+  tree ni_type = TREE_TYPE (LOOP_VINFO_NITERSM1 (loop_vinfo));
+  widest_int max_ni = wi::to_widest (TYPE_MAX_VALUE (ni_type)) + 1;
+
+  /* Get a more refined estimate for the number of iterations.  */
+  widest_int max_back_edges;
+  if (max_loop_iterations (loop, &max_back_edges))
+    max_ni = wi::smin (max_ni, max_back_edges + 1);
+
+  /* Account for rgroup masks, in which each bit is replicated N times.  */
+  max_ni *= vect_get_max_nscalars_per_iter (loop_vinfo);
+
+  /* Work out how many bits we need to represent the limit.  */
+  min_ni_width = wi::min_precision (max_ni, UNSIGNED);
+
+  /* Find a scalar mode for which WHILE_ULT is supported.  */
+  opt_scalar_int_mode cmp_mode_iter;
+  tree cmp_type = NULL_TREE;
+  FOR_EACH_MODE_IN_CLASS (cmp_mode_iter, MODE_INT)
+    {
+      scalar_int_mode cmp_mode = cmp_mode_iter.require ();
+      if (GET_MODE_BITSIZE (cmp_mode) >= min_ni_width)
+	{
+	  tree this_type = lang_hooks.types.type_for_mode (cmp_mode, true);
+	  if (this_type
+	      && can_produce_all_loop_masks_p (loop_vinfo, this_type))
+	    {
+	      /* Although we could stop as soon as we find a valid mode,
+		 it's often better to continue until we hit Pmode, since the
+		 operands to the WHILE are more likely to be reusable in
+		 address calculations.  */
+	      cmp_type = this_type;
+	      if (GET_MODE_SIZE (cmp_mode) >= GET_MODE_SIZE (Pmode))
+		break;
+	    }
+	}
+    }
+
+  if (!cmp_type)
+    return false;
+
+  LOOP_VINFO_MASK_COMPARE_TYPE (loop_vinfo) = cmp_type;
+  return true;
+}
 
 /* Calculate the cost of one scalar iteration of the loop.  */
 static void
@@ -1985,6 +2090,12 @@ vect_analyze_loop_2 (loop_vec_info loop_vinfo, bool &fatal)
       vect_update_vf_for_slp (loop_vinfo);
     }
 
+  bool saved_can_fully_mask_p = LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo);
+
+  /* We don't expect to have to roll back to anything other than an empty
+     set of rgroups.  */
+  gcc_assert (LOOP_VINFO_MASKS (loop_vinfo).is_empty ());
+
   /* This is the point where we can re-start analysis with SLP forced off.  */
 start_over:
 
@@ -2073,11 +2184,47 @@ start_over:
       return false;
     }
 
+  if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
+      && LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
+    {
+      LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
+      if (dump_enabled_p ())
+	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			 "Can't use a fully-masked loop because peeling for"
+			 " gaps is required.\n");
+    }
+
+  if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
+      && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo))
+    {
+      LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
+      if (dump_enabled_p ())
+	dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			 "Can't use a fully-masked loop because peeling for"
+			 " alignment is required.\n");
+    }
+
+  /* Decide whether to use a fully-masked loop for this vectorization
+     factor.  */
+  LOOP_VINFO_FULLY_MASKED_P (loop_vinfo)
+    = (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo)
+       && vect_verify_full_masking (loop_vinfo));
+  if (dump_enabled_p ())
+    {
+      if (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+	dump_printf_loc (MSG_NOTE, vect_location,
+			 "Using a fully-masked loop.\n");
+      else
+	dump_printf_loc (MSG_NOTE, vect_location,
+			 "Not using a fully-masked loop.\n");
+    }
+
   /* If epilog loop is required because of data accesses with gaps,
      one additional iteration needs to be peeled.  Check if there is
      enough iterations for vectorization.  */
   if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo)
-      && LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo))
+      && LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
+      && !LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
     {
       poly_uint64 vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo);
       tree scalar_niters = LOOP_VINFO_NITERSM1 (loop_vinfo);
@@ -2158,8 +2305,11 @@ start_over:
   th = LOOP_VINFO_COST_MODEL_THRESHOLD (loop_vinfo);
 
   unsigned HOST_WIDE_INT const_vf;
-  if (LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
-      && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo) > 0)
+  if (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+    /* The main loop handles all iterations.  */
+    LOOP_VINFO_PEELING_FOR_NITER (loop_vinfo) = false;
+  else if (LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
+	   && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo) > 0)
     {
       if (!multiple_p (LOOP_VINFO_INT_NITERS (loop_vinfo)
 		       - LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo),
@@ -2217,7 +2367,8 @@ start_over:
 	niters_th = LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo);
 
       /* Niters for at least one iteration of vectorized loop.  */
-      niters_th += LOOP_VINFO_VECT_FACTOR (loop_vinfo);
+      if (!LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+	niters_th += LOOP_VINFO_VECT_FACTOR (loop_vinfo);
       /* One additional iteration because of peeling for gap.  */
       if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo))
 	niters_th += 1;
@@ -2320,11 +2471,14 @@ again:
   destroy_cost_data (LOOP_VINFO_TARGET_COST_DATA (loop_vinfo));
   LOOP_VINFO_TARGET_COST_DATA (loop_vinfo)
     = init_cost (LOOP_VINFO_LOOP (loop_vinfo));
+  /* Reset accumulated rgroup information.  */
+  release_vec_loop_masks (&LOOP_VINFO_MASKS (loop_vinfo));
   /* Reset assorted flags.  */
   LOOP_VINFO_PEELING_FOR_NITER (loop_vinfo) = false;
   LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo) = false;
   LOOP_VINFO_COST_MODEL_THRESHOLD (loop_vinfo) = 0;
   LOOP_VINFO_VERSIONING_THRESHOLD (loop_vinfo) = 0;
+  LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = saved_can_fully_mask_p;
 
   goto start_over;
 }
@@ -3519,7 +3673,7 @@ vect_estimate_min_profitable_iters (loop_vec_info loop_vinfo,
     = LOOP_VINFO_SINGLE_SCALAR_ITERATION_COST (loop_vinfo);
 
   /* Add additional cost for the peeled instructions in prologue and epilogue
-     loop.
+     loop.  (For fully-masked loops there will be no peeling.)
 
      FORNOW: If we don't know the value of peel_iters for prologue or epilogue
      at compile-time - we assume it's vf/2 (the worst would be vf-1).
@@ -3527,7 +3681,12 @@ vect_estimate_min_profitable_iters (loop_vec_info loop_vinfo,
      TODO: Build an expression that represents peel_iters for prologue and
      epilogue to be used in a run-time test.  */
 
-  if (npeel  < 0)
+  if (LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+    {
+      peel_iters_prologue = 0;
+      peel_iters_epilogue = 0;
+    }
+  else if (npeel < 0)
     {
       peel_iters_prologue = assumed_vf / 2;
       dump_printf (MSG_NOTE, "cost model: "
@@ -3758,11 +3917,12 @@ vect_estimate_min_profitable_iters (loop_vec_info loop_vinfo,
 	       "  Calculated minimum iters for profitability: %d\n",
 	       min_profitable_iters);
 
-  /* We want the vectorized loop to execute at least once.  */
-  min_profitable_iters = MAX (min_profitable_iters,
-			      assumed_vf
-			      + peel_iters_prologue
-			      + peel_iters_epilogue);
+  if (!LOOP_VINFO_FULLY_MASKED_P (loop_vinfo))
+    /* We want the vectorized loop to execute at least once.  */
+    min_profitable_iters = MAX (min_profitable_iters,
+				assumed_vf
+				+ peel_iters_prologue
+				+ peel_iters_epilogue);
 
   if (dump_enabled_p ())
     dump_printf_loc (MSG_NOTE, vect_location,
@@ -6585,10 +6745,46 @@ vectorizable_reduction (gimple *stmt, gimple_stmt_iterator *gsi,
       return false;
     }
 
+  internal_fn cond_fn = get_conditional_internal_fn (code, scalar_type);
+
+  /* In a speculative loop, the update must be predicated on the
+     nonspeculative masks, so that we don't include speculatively
+     loaded elements from beyond the end of the original loop.  */
+  vec_loop_masks *masks = &LOOP_VINFO_MASKS (loop_vinfo);
+
+  if (slp_node)
+    vec_num = SLP_TREE_NUMBER_OF_VEC_STMTS (slp_node);
+  else
+    vec_num = 1;
+
   if (!vec_stmt) /* transformation not required.  */
     {
       if (first_p)
 	vect_model_reduction_cost (stmt_info, epilog_reduc_code, ncopies);
+      if (loop_vinfo && LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo))
+	{
+	  if (cond_fn == IFN_LAST
+	      || !direct_internal_fn_supported_p (cond_fn, vectype_in,
+						  OPTIMIZE_FOR_SPEED))
+	    {
+	      if (dump_enabled_p ())
+		dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+				 "Can't use a fully-masked loop because no"
+				 " conditional operation is available.\n");
+	      LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
+	    }
+	  else if (reduc_index == -1)
+	    {
+	      if (dump_enabled_p ())
+		dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+				 "Can't use a fully-masked loop for chained"
+				 " reductions.\n");
+	      LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
+	    }
+	  else
+	    vect_record_loop_mask (loop_vinfo, masks, ncopies * vec_num,
+				   vectype_in);
+	}
       STMT_VINFO_TYPE (stmt_info) = reduc_vec_info_type;
       return true;
     }
@@ -6602,16 +6798,15 @@ vectorizable_reduction (gimple *stmt, gimple_stmt_iterator *gsi,
   if (code == COND_EXPR)
     gcc_assert (ncopies == 1);
 
+  bool masked_loop_p = LOOP_VINFO_FULLY_MASKED_P (loop_vinfo);
+
   /* Create the destination vector  */
   vec_dest = vect_create_destination_var (scalar_dest, vectype_out);
 
   prev_stmt_info = NULL;
   prev_phi_info = NULL;
-  if (slp_node)
-    vec_num = SLP_TREE_NUMBER_OF_VEC_STMTS (slp_node);
-  else
+  if (!slp_node)
     {
-      vec_num = 1;
       vec_oprnds0.create (1);
       vec_oprnds1.create (1);
       if (op_type == ternary_op)
@@ -6685,19 +6880,19 @@ vectorizable_reduction (gimple *stmt, gimple_stmt_iterator *gsi,
 	      gcc_assert (reduc_index != -1 || ! single_defuse_cycle);
 
 	      if (single_defuse_cycle && reduc_index == 0)
-		vec_oprnds0[0] = gimple_assign_lhs (new_stmt);
+		vec_oprnds0[0] = gimple_get_lhs (new_stmt);
 	      else
 		vec_oprnds0[0]
 		  = vect_get_vec_def_for_stmt_copy (dts[0], vec_oprnds0[0]);
 	      if (single_defuse_cycle && reduc_index == 1)
-		vec_oprnds1[0] = gimple_assign_lhs (new_stmt);
+		vec_oprnds1[0] = gimple_get_lhs (new_stmt);
 	      else
 		vec_oprnds1[0]
 		  = vect_get_vec_def_for_stmt_copy (dts[1], vec_oprnds1[0]);
 	      if (op_type == ternary_op)
 		{
 		  if (single_defuse_cycle && reduc_index == 2)
-		    vec_oprnds2[0] = gimple_assign_lhs (new_stmt);
+		    vec_oprnds2[0] = gimple_get_lhs (new_stmt);
 		  else
 		    vec_oprnds2[0] 
 		      = vect_get_vec_def_for_stmt_copy (dts[2], vec_oprnds2[0]);
@@ -6708,13 +6903,33 @@ vectorizable_reduction (gimple *stmt, gimple_stmt_iterator *gsi,
       FOR_EACH_VEC_ELT (vec_oprnds0, i, def0)
         {
 	  tree vop[3] = { def0, vec_oprnds1[i], NULL_TREE };
-	  if (op_type == ternary_op)
-	    vop[2] = vec_oprnds2[i];
+	  if (masked_loop_p)
+	    {
+	      /* Make sure that the reduction accumulator is vop[0].  */
+	      if (reduc_index == 1)
+		{
+		  gcc_assert (commutative_tree_code (code));
+		  std::swap (vop[0], vop[1]);
+		}
+	      tree mask = vect_get_loop_mask (gsi, masks, vec_num * ncopies,
+					      vectype_in, i * ncopies + j);
+	      gcall *call = gimple_build_call_internal (cond_fn, 3, mask,
+							vop[0], vop[1]);
+	      new_temp = make_ssa_name (vec_dest, call);
+	      gimple_call_set_lhs (call, new_temp);
+	      gimple_call_set_nothrow (call, true);
+	      new_stmt = call;
+	    }
+	  else
+	    {
+	      if (op_type == ternary_op)
+		vop[2] = vec_oprnds2[i];
 
-          new_temp = make_ssa_name (vec_dest, new_stmt);
-          new_stmt = gimple_build_assign (new_temp, code,
-					  vop[0], vop[1], vop[2]);
-          vect_finish_stmt_generation (stmt, new_stmt, gsi);
+	      new_temp = make_ssa_name (vec_dest, new_stmt);
+	      new_stmt = gimple_build_assign (new_temp, code,
+					      vop[0], vop[1], vop[2]);
+	    }
+	  vect_finish_stmt_generation (stmt, new_stmt, gsi);
 
           if (slp_node)
             {
@@ -6739,7 +6954,7 @@ vectorizable_reduction (gimple *stmt, gimple_stmt_iterator *gsi,
   /* Finalize the reduction-phi (set its arguments) and create the
      epilog reduction code.  */
   if ((!single_defuse_cycle || code == COND_EXPR) && !slp_node)
-    vect_defs[0] = gimple_assign_lhs (*vec_stmt);
+    vect_defs[0] = gimple_get_lhs (*vec_stmt);
 
   vect_create_epilog_for_reduction (vect_defs, stmt, reduc_def_stmt,
 				    epilog_copies,
@@ -7422,8 +7637,19 @@ vectorizable_live_operation (gimple *stmt,
     }
 
   if (!vec_stmt)
-    /* No transformation required.  */
-    return true;
+    {
+      if (LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo))
+	{
+	  if (dump_enabled_p ())
+	    dump_printf_loc (MSG_MISSED_OPTIMIZATION, vect_location,
+			     "Can't use a fully-masked loop because "
+			     "a value is live outside the loop.\n");
+	  LOOP_VINFO_CAN_FULLY_MASK_P (loop_vinfo) = false;
+	}
+
+      /* No transformation required.  */
+      return true;
+    }
 
   /* If stmt has a related stmt, then use that for getting the lhs.  */
   if (is_pattern_stmt_p (stmt_info))
@@ -7442,6 +7668,8 @@ vectorizable_live_operation (gimple *stmt,
   tree vec_lhs, bitstart;
   if (slp_node)
     {
+      gcc_assert (!LOOP_VINFO_FULLY_MASKED_P (loop_vinfo));
+
       /* Get the correct slp vectorized stmt.  */
       vec_lhs = gimple_get_lhs (SLP_TREE_VEC_STMTS (slp_node)[vec_entry]);
 
@@ -7569,6 +7797,97 @@ loop_niters_no_overflow (loop_vec_info loop_vinfo)
 	return true;
     }
   return false;
+}
+
+/* Return a mask type with half the number of elements as TYPE.  */
+
+tree
+vect_halve_mask_nunits (tree type)
+{
+  poly_uint64 nunits = exact_div (TYPE_VECTOR_SUBPARTS (type), 2);
+  return build_truth_vector_type (nunits, current_vector_size);
+}
+
+/* Return a mask type with twice as many elements as TYPE.  */
+
+tree
+vect_double_mask_nunits (tree type)
+{
+  poly_uint64 nunits = TYPE_VECTOR_SUBPARTS (type) * 2;
+  return build_truth_vector_type (nunits, current_vector_size);
+}
+
+/* Record that a fully-masked version of LOOP_VINFO would need MASKS to
+   contain a sequence of NVECTORS masks that each control a vector of type
+   VECTYPE.  */
+
+void
+vect_record_loop_mask (loop_vec_info loop_vinfo, vec_loop_masks *masks,
+		       unsigned int nvectors, tree vectype)
+{
+  gcc_assert (nvectors != 0);
+  if (masks->length () < nvectors)
+    masks->safe_grow_cleared (nvectors);
+  rgroup_masks *rgm = &(*masks)[nvectors - 1];
+  /* The number of scalars per iteration and the number of vectors are
+     both compile-time constants.  */
+  unsigned int nscalars_per_iter
+    = exact_div (nvectors * TYPE_VECTOR_SUBPARTS (vectype),
+		 LOOP_VINFO_VECT_FACTOR (loop_vinfo)).to_constant ();
+  if (rgm->max_nscalars_per_iter < nscalars_per_iter)
+    {
+      rgm->max_nscalars_per_iter = nscalars_per_iter;
+      rgm->mask_type = build_same_sized_truth_vector_type (vectype);
+    }
+}
+
+/* Given a complete set of masks MASKS, extract mask number INDEX
+   for an rgroup that operates on NVECTORS vectors of type VECTYPE,
+   where 0 <= INDEX < NVECTORS.  Insert any set-up statements before GSI.
+
+   See the comment above vec_loop_masks for more details about the mask
+   arrangement.  */
+
+tree
+vect_get_loop_mask (gimple_stmt_iterator *gsi, vec_loop_masks *masks,
+		    unsigned int nvectors, tree vectype, unsigned int index)
+{
+  rgroup_masks *rgm = &(*masks)[nvectors - 1];
+  tree mask_type = rgm->mask_type;
+
+  /* Populate the rgroup's mask array, if this is the first time we've
+     used it.  */
+  if (rgm->masks.is_empty ())
+    {
+      rgm->masks.safe_grow_cleared (nvectors);
+      for (unsigned int i = 0; i < nvectors; ++i)
+	{
+	  tree mask = make_temp_ssa_name (mask_type, NULL, "loop_mask");
+	  /* Provide a dummy definition until the real one is available.  */
+	  SSA_NAME_DEF_STMT (mask) = gimple_build_nop ();
+	  rgm->masks[i] = mask;
+	}
+    }
+
+  tree mask = rgm->masks[index];
+  if (may_ne (TYPE_VECTOR_SUBPARTS (mask_type),
+	      TYPE_VECTOR_SUBPARTS (vectype)))
+    {
+      /* A loop mask for data type X can be reused for data type Y
+	 if X has N times more elements than Y and if Y's elements
+	 are N times bigger than X's.  In this case each sequence
+	 of N elements in the loop mask will be all-zero or all-one.
+	 We can then view-convert the mask so that each sequence of
+	 N elements is replaced by a single element.  */
+      gcc_assert (multiple_p (TYPE_VECTOR_SUBPARTS (mask_type),
+			      TYPE_VECTOR_SUBPARTS (vectype)));
+      gimple_seq seq = NULL;
+      mask_type = build_same_sized_truth_vector_type (vectype);
+      mask = gimple_build (&seq, VIEW_CONVERT_EXPR, mask_type, mask);
+      if (seq)
+	gsi_insert_seq_before (gsi, seq, GSI_SAME_STMT);
+    }
+  return mask;
 }
 
 /* Scale profiling counters by estimation for LOOP which is vectorized
@@ -7711,12 +8030,22 @@ vect_transform_loop (loop_vec_info loop_vinfo)
   bool niters_no_overflow = loop_niters_no_overflow (loop_vinfo);
   epilogue = vect_do_peeling (loop_vinfo, niters, nitersm1, &niters_vector, th,
 			      check_profitability, niters_no_overflow);
+
+  bool final_iter_may_be_partial = LOOP_VINFO_FULLY_MASKED_P (loop_vinfo);
   if (niters_vector == NULL_TREE)
     {
       if (LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo) && must_eq (lowest_vf, vf))
-	niters_vector
-	  = build_int_cst (TREE_TYPE (LOOP_VINFO_NITERS (loop_vinfo)),
-			   LOOP_VINFO_INT_NITERS (loop_vinfo) / lowest_vf);
+	{
+	  wide_int niters_vector_val
+	    = (final_iter_may_be_partial
+	       ? wi::udiv_ceil (LOOP_VINFO_NITERS (loop_vinfo),
+				lowest_vf)
+	       : wi::udiv_floor (LOOP_VINFO_NITERS (loop_vinfo),
+				 lowest_vf));
+	  niters_vector
+	    = wide_int_to_tree (TREE_TYPE (LOOP_VINFO_NITERS (loop_vinfo)),
+				niters_vector_val);
+	}
       else
 	vect_gen_vector_loop_niters (loop_vinfo, niters, &niters_vector,
 				     niters_no_overflow);
@@ -7969,7 +8298,7 @@ vect_transform_loop (loop_vec_info loop_vinfo)
 	}		        /* stmts in BB */
     }				/* BBs in loop */
 
-  slpeel_make_loop_iterate_ntimes (loop, niters_vector);
+  slpeel_finalize_loop_iterations (loop, loop_vinfo, niters_vector, niters);
 
   unsigned int assumed_vf = vect_vf_for_cost (loop_vinfo);
   scale_profile_for_vect_loop (loop, assumed_vf);
@@ -7986,16 +8315,25 @@ vect_transform_loop (loop_vec_info loop_vinfo)
      back to latch counts.  */
   if (loop->any_upper_bound)
     loop->nb_iterations_upper_bound
-      = wi::udiv_floor (loop->nb_iterations_upper_bound + bias,
-			lowest_vf) - 1;
+      = (final_iter_may_be_partial
+	 ? wi::udiv_ceil (loop->nb_iterations_upper_bound + bias,
+			  lowest_vf) - 1
+	 : wi::udiv_floor (loop->nb_iterations_upper_bound + bias,
+			   lowest_vf) - 1);
   if (loop->any_likely_upper_bound)
     loop->nb_iterations_likely_upper_bound
-      = wi::udiv_floor (loop->nb_iterations_likely_upper_bound + bias,
-			lowest_vf) - 1;
+      = (final_iter_may_be_partial
+	 ? wi::udiv_ceil (loop->nb_iterations_likely_upper_bound + bias,
+			  lowest_vf) - 1
+	 : wi::udiv_floor (loop->nb_iterations_likely_upper_bound + bias,
+			   lowest_vf) - 1);
   if (loop->any_estimate)
     loop->nb_iterations_estimate
-      = wi::udiv_floor (loop->nb_iterations_estimate + bias,
-			assumed_vf) - 1;
+      = (final_iter_may_be_partial
+	 ? wi::udiv_ceil (loop->nb_iterations_estimate + bias,
+			  assumed_vf) - 1
+	 : wi::udiv_floor (loop->nb_iterations_estimate + bias,
+			   assumed_vf) - 1);
 
   if (dump_enabled_p ())
     {
