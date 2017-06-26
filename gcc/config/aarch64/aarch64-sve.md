@@ -1860,3 +1860,15 @@
     operands[7] = gen_rtx_SUBREG (V4DImode, operands[5], 0);
   }
 )
+
+(define_insn "vec_shl_insert_<mode>"
+  [(set (match_operand:SVE_ALL 0 "register_operand" "=w, w")
+	(unspec:SVE_ALL
+	  [(match_operand:SVE_ALL 1 "register_operand" "0, 0")
+	   (match_operand:<VEL> 2 "register_operand" "rZ, w")]
+	  UNSPEC_INSR))]
+  "TARGET_SVE"
+  "@
+   insr\t%0.<Vetype>, %<vwcore>2
+   insr\t%0.<Vetype>, %<Vetype>2"
+)

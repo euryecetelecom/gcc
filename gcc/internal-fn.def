@@ -107,6 +107,8 @@ DEF_INTERNAL_OPTAB_FN (VEC_EXTRACT_ODD, ECF_CONST | ECF_NOTHROW,
 		       vec_extract_odd, binary)
 DEF_INTERNAL_OPTAB_FN (VEC_REVERSE, ECF_CONST | ECF_NOTHROW,
 		       vec_reverse, unary)
+DEF_INTERNAL_OPTAB_FN (VEC_SHL_INSERT, ECF_CONST | ECF_NOTHROW,
+		       vec_shl_insert, binary)
 
 DEF_INTERNAL_OPTAB_FN (RSQRT, ECF_CONST, rsqrt, unary)
 
