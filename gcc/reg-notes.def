@@ -228,3 +228,10 @@ REG_NOTE (RETURNED)
    The decl might not be available in the call due to splitting of the call
    insn.  This note is a SYMBOL_REF.  */
 REG_NOTE (CALL_DECL)
+
+/* Indicate that a call is a NOTRACK call.  The target address of the call
+   is assumed as a valid address and no check to validate the target
+   address is needed.  The call is marked when a called function has a
+   'notrack' attribute.  This note is used by the compiler when the option
+   -finstrument-control-flow is specified.  */
+REG_NOTE (CALL_NOTRACK)

@@ -1602,6 +1602,11 @@ finline-atomics
 Common Report Var(flag_inline_atomics) Init(1) Optimization
 Inline __atomic operations when a lock free instruction sequence is available.
 
+finstrument-control-flow
+Common Report Var(flag_instrument_control_flow) Init(-1)
+Instrument functions with checks to verify jump/call control-flow transfer
+instructions have valid targets.
+
 finstrument-functions
 Common Report Var(flag_instrument_function_entry_exit)
 Instrument function entry and exit with profiling calls.

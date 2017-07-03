@@ -380,6 +380,23 @@ gimple_build_call_from_tree (tree t)
   gimple_set_no_warning (call, TREE_NO_WARNING (t));
   gimple_call_set_with_bounds (call, CALL_WITH_BOUNDS_P (t));
 
+  if (fndecl == NULL_TREE)
+    {
+      /* Find the type of an indirect call.  */
+      tree addr = CALL_EXPR_FN (t);
+      if (TREE_CODE (addr) != FUNCTION_DECL)
+	{
+	  tree fntype = TREE_TYPE (addr);
+	  gcc_assert (POINTER_TYPE_P (fntype));
+	  fntype = TREE_TYPE (fntype);
+
+	  /* Check if its type has the no-track attribute and propagate
+	     it to the CALL insn.  */
+	  if (lookup_attribute ("notrack", TYPE_ATTRIBUTES (fntype)))
+	    gimple_call_set_with_notrack (call, TRUE);
+	}
+    }
+
   return call;
 }
 

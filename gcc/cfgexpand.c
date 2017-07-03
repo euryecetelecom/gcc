@@ -2659,11 +2659,22 @@ expand_call_stmt (gcall *stmt)
 	  }
     }
 
+  rtx_insn *before_call = get_last_insn ();
   lhs = gimple_call_lhs (stmt);
   if (lhs)
     expand_assignment (lhs, exp, false);
   else
     expand_expr (exp, const0_rtx, VOIDmode, EXPAND_NORMAL);
+
+  /* Find a generated CALL insn to propagate a 'notrack' attribute.  */
+  rtx_insn *last = get_last_insn ();
+  while (!CALL_P (last)
+	 && (last != before_call))
+    last = PREV_INSN (last);
+
+  if (last != before_call
+      && gimple_call_with_notrack_p (stmt))
+    add_reg_note (last, REG_CALL_NOTRACK, const0_rtx);
 
   mark_transaction_restart_calls (stmt);
 }

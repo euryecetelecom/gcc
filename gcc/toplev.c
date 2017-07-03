@@ -1297,6 +1297,17 @@ process_options (void)
 	   "-floop-parallelize-all)");
 #endif
 
+  if (flag_instrument_control_flow == -1)
+    flag_instrument_control_flow = 0;
+  else if (flag_instrument_control_flow > 0
+	   && flag_instrument_control_flow != 2)
+    {
+      error_at (UNKNOWN_LOCATION,
+		"%<-finstrument-control-flow%> is not supported for this "
+		"target");
+      flag_instrument_control_flow = 0;
+    }
+
   if (flag_check_pointer_bounds)
     {
       if (targetm.chkp_bound_mode () == VOIDmode)

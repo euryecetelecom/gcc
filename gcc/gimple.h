@@ -148,6 +148,7 @@ enum gf_mask {
     GF_CALL_WITH_BOUNDS 	= 1 << 8,
     GF_CALL_MUST_TAIL_CALL	= 1 << 9,
     GF_CALL_BY_DESCRIPTOR	= 1 << 10,
+    GF_CALL_WITH_NOTRACK 	= 1 << 11,
     GF_OMP_PARALLEL_COMBINED	= 1 << 0,
     GF_OMP_PARALLEL_GRID_PHONY = 1 << 1,
     GF_OMP_TASK_TASKLOOP	= 1 << 0,
@@ -2892,6 +2893,39 @@ gimple_call_set_with_bounds (gimple *gs, bool with_bounds)
   gimple_call_set_with_bounds (gc, with_bounds);
 }
 
+
+/* Return true if call GS is marked as no-track.  */
+
+static inline bool
+gimple_call_with_notrack_p (const gcall *gs)
+{
+  return (gs->subcode & GF_CALL_WITH_NOTRACK) != 0;
+}
+
+static inline bool
+gimple_call_with_notrack_p (const gimple *gs)
+{
+  const gcall *gc = GIMPLE_CHECK2<const gcall *> (gs);
+  return gimple_call_with_notrack_p (gc);
+}
+
+/* Mark statement GS as no-track call.  */
+
+static inline void
+gimple_call_set_with_notrack (gcall *gs, bool with_notrack)
+{
+  if (with_notrack)
+    gs->subcode |= GF_CALL_WITH_NOTRACK;
+  else
+    gs->subcode &= ~GF_CALL_WITH_NOTRACK;
+}
+
+static inline void
+gimple_call_set_with_notrack (gimple *gs, bool with_notrack)
+{
+  gcall *gc = GIMPLE_CHECK2<gcall *> (gs);
+  gimple_call_set_with_notrack (gc, with_notrack);
+}
 
 /* Return the target of internal call GS.  */
 
