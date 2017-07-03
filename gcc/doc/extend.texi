@@ -5643,6 +5643,58 @@ Specify which floating-point unit to use.  You must specify the
 @code{target("fpmath=sse,387")} option as
 @code{target("fpmath=sse+387")} because the comma would separate
 different options.
+
+@item notrack
+@cindex @code{notrack} function attribute
+The @code{notrack} attribute on a function is used to inform the
+compiler that the function's prolog should not be instrumented when
+compiled with the @option{-finstrument-control-flow} option.  The
+compiler assumes that the function's address is a valid target for a
+control-flow transfer.
+
+The @code{notrack} attribute on a type of pointer to function is
+used to inform the compiler that a call through the pointer should
+not be instrumented when compiled with the
+@option{-finstrument-control-flow} option.  The compiler assumes
+that the function's address from the pointer is a valid target for
+a control-flow transfer.  A direct function call through a function
+name is assumed as a save call thus direct calls will not be
+instrumented by the compiler.
+
+The @code{notrack} attribute is applied to an object's type.  A
+The @code{notrack} attribute is transfered to a call instruction at
+the GIMPLE and RTL translation phases.  The attribute is not propagated
+through assignment, store and load.
+
+@smallexample
+@{
+void (*foo)(void) __attribute__(notrack);
+void (*foo1)(void) __attribute__(notrack);
+void (*foo2)(void);
+
+int
+foo (void) /* The function's address is not tracked.  */
+
+  /* This call site is not tracked for
+     control-flow instrumentation.  */
+  (*foo1)();
+  foo1 = foo2;
+  /* This call site is still not tracked for
+     control-flow instrumentation.  */
+  (*foo1)();
+
+  /* This call site is tracked for
+     control-flow instrumentation.  */
+  (*foo2)();
+  foo2 = foo1;
+  /* This call site is still tracked for
+     control-flow instrumentation.  */
+  (*foo2)();
+
+  return 0;
+@}
+@end smallexample
+
 @end table
 
 On the x86, the inliner does not inline a

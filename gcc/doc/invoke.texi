@@ -459,6 +459,7 @@ Objective-C and Objective-C++ Dialects}.
 -fchkp-check-read  -fchkp-check-write  -fchkp-store-bounds @gol
 -fchkp-instrument-calls  -fchkp-instrument-marked-only @gol
 -fchkp-use-wrappers  -fchkp-flexible-struct-trailing-arrays@gol
+-finstrument-control-flow @gol
 -fstack-protector  -fstack-protector-all  -fstack-protector-strong @gol
 -fstack-protector-explicit  -fstack-check @gol
 -fstack-limit-register=@var{reg}  -fstack-limit-symbol=@var{sym} @gol
@@ -11293,6 +11294,27 @@ with calls to wrapper functions.  When @option{-fchkp-use-wrappers}
 is used to link a program, the GCC driver automatically links
 against @file{libmpxwrappers}.  See also @option{-static-libmpxwrappers}.
 Enabled by default.
+
+@item -finstrument-control-flow
+@opindex finstrument-control-flow
+@opindex fno-instrument-control-flow
+Enable code instrumentation of control-flow transfers to increase
+a program security by checking a target address of control-flow
+transfer instructions (i.e. routine call, routine return, jump)
+are valid targets.  This prevents diverting the control flow
+instructions from its original target address to a new undesigned
+target.  This is intended to protect against such theats as
+Return-oriented Programming (ROP), and similarly call/jmp-oriented
+programming (COP/JOP).
+
+Each compiler, which will support the control-flow instrumentation,
+is supposed to have its own target specific implementation of the
+control-flow instrumentation and in case of absence of such
+implementation the @option{-finstrument-control-flow} will
+cause an error message.
+
+A user has a control through the @code{notrack} attribute to identify
+which functions and calls should be skipped from instrumentation.
 
 @item -fstack-protector
 @opindex fstack-protector

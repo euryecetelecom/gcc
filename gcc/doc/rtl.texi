@@ -4040,6 +4040,21 @@ is used in place of the actual insn pattern.  This is done in cases where
 the pattern is either complex or misleading.
 @end table
 
+The note @code{REG_CALL_NOTRACK} describe the information connected to
+the code instrumentation which is done when @code{-finstrument-control-flow}
+option is specified.  The note is set if a @code{notrack} attribute is
+specified. The note is stored in the @code{REG_NOTES} field of an insn.
+
+@table @code
+@findex REG_CALL_NOTRACK
+@item REG_CALL_NOTRACK
+A user has a control through the @code{notrack} attribute to identify
+which call to a function should be skipped from instrumentation.  The
+compiler puts a @samp{REG_CALL_NOTRACK} note on @samp{CALL_INSN}
+instruction, which has a function type marked with a @code{notrack}
+attribute.
+@end table
+
 For convenience, the machine mode in an @code{insn_list} or
 @code{expr_list} is printed using these symbolic codes in debugging dumps.
 
