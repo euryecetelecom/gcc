@@ -5652,14 +5652,24 @@ compiled with the @option{-finstrument-control-flow} option.  The
 compiler assumes that the function's address is a valid target for a
 control-flow transfer.
 
+@emph{x86 implementation:} For function bodies, which do not have
+the @code{notrack} attribute, the compiler insert an ENDBR
+instruction at function entry.  The instruction triggers
+the HW to check if a control-flow transfer to the function is valid.
+When compiled with the @option{-finstrument-control-flow} option
+the ENDBR instruction also inserted at addresses to which indirect
+control-flow trasfer can happen.
+
 The @code{notrack} attribute on a type of pointer to function is
 used to inform the compiler that a call through the pointer should
 not be instrumented when compiled with the
 @option{-finstrument-control-flow} option.  The compiler assumes
 that the function's address from the pointer is a valid target for
-a control-flow transfer.  A direct function call through a function
-name is assumed as a save call thus direct calls will not be
-instrumented by the compiler.
+a control-flow transfer. For @emph{x86 implementation} the compiler
+insert a NOTRACK prefix before a indeirect call instruction.  A
+direct function call through a function name is assumed as a save
+call thus direct calls will not be instrumented by the compiler
+and no NOTRACK prefix is inserted before direct calls.
 
 The @code{notrack} attribute is applied to an object's type.  A
 The @code{notrack} attribute is transfered to a call instruction at
@@ -21101,6 +21111,24 @@ They generate reads and writes to PKRU.
 @smallexample
 void __builtin_ia32_wrpkru (unsigned int)
 unsigned int __builtin_ia32_rdpkru ()
+@end smallexample
+
+The following built-in functions are available when @option{-mcet} is used.
+They are used to support Intel Control-flow Enforcment Technology (CET).
+All of them generate the machine instruction that is part of the name.
+@smallexample
+unsigned int __builtin_ia32_rdsspd (unsigned int)
+unsigned long long __builtin_ia32_rdsspq (unsigned long long)
+void __builtin_ia32_incsspd (unsigned int)
+void __builtin_ia32_incsspq (unsigned long long)
+void __builtin_ia32_saveprevssp(void);
+void __builtin_ia32_rstorssp(void *);
+void __builtin_ia32_wrssd(unsigned int, void *);
+void __builtin_ia32_wrssq(unsigned long long, void *);
+void __builtin_ia32_wrussd(unsigned int, void *);
+void __builtin_ia32_wrussq(unsigned long long, void *);
+void __builtin_ia32_setssbsy(void);
+void __builtin_ia32_clrssbsy(void *);
 @end smallexample
 
 @node x86 transactional memory intrinsics

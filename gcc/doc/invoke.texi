@@ -1202,6 +1202,7 @@ See RS/6000 and PowerPC Options.
 -msse4a  -m3dnow  -m3dnowa  -mpopcnt  -mabm  -mbmi  -mtbm  -mfma4  -mxop @gol
 -mlzcnt  -mbmi2  -mfxsr  -mxsave  -mxsaveopt  -mrtm  -mlwp  -mmpx  @gol
 -mmwaitx  -mclzero  -mpku  -mthreads @gol
+-mcet -mibt -mshstk @gol
 -mms-bitfields  -mno-align-stringops  -minline-all-stringops @gol
 -minline-stringops-dynamically  -mstringop-strategy=@var{alg} @gol
 -mmemcpy-strategy=@var{strategy}  -mmemset-strategy=@var{strategy} @gol
@@ -11299,7 +11300,7 @@ Enabled by default.
 @opindex finstrument-control-flow
 @opindex fno-instrument-control-flow
 Enable code instrumentation of control-flow transfers to increase
-a program security by checking a target address of control-flow
+a program security by checking target addresses of control-flow
 transfer instructions (i.e. routine call, routine return, jump)
 are valid targets.  This prevents diverting the control flow
 instructions from its original target address to a new undesigned
@@ -11307,14 +11308,30 @@ target.  This is intended to protect against such theats as
 Return-oriented Programming (ROP), and similarly call/jmp-oriented
 programming (COP/JOP).
 
-Each compiler, which will support the control-flow instrumentation,
-is supposed to have its own target specific implementation of the
-control-flow instrumentation and in case of absence of such
-implementation the @option{-finstrument-control-flow} will
-cause an error message.
+Each compiler, which supports the @option{-finstrument-control-flow}
+option, is supposed to have its own target specific implementation
+of the control-flow instrumentation and in case of absence of such
+implementation the @option{-finstrument-control-flow} results in
+an error message.
 
 A user has a control through the @code{notrack} attribute to identify
-which functions and calls should be skipped from instrumentation.
+which function addresses and calls should be skipped from
+instrumentation.
+
+Currently an implementation is available based on Intel Control-flow
+Enforcment Technology (CET), thus x86 GNU/Linux target and
+@option{-mcet} are required to enable this feature.  In order
+to get an application to be CET enabled the implementation requires
+all object files have to be compiled with
+@option{-finstrument-control-flow} and all linked in libraries have
+to be CET enabled.
+
+Instrumentation for x86 is controlled by target specific @option{-mcet},
+@option{-mibt} and @option{-mshstk} options and @code{notrack}
+attribute for function (@pxref{x86 Function Attributes}). The compiler
+also provides a number of built-in functions for fine-grained controll
+of CET-based implementation.  See @xref{x86 Built-in Functions},
+for more information.
 
 @item -fstack-protector
 @opindex fstack-protector
@@ -25658,15 +25675,19 @@ preferred alignment to @option{-mpreferred-stack-boundary=2}.
 @need 200
 @itemx -mclzero
 @opindex mclzero
+@need 200
 @itemx -mpku
 @opindex mpku
+@need 200
+@itemx -mcet
+@opindex mcet
 These switches enable the use of instructions in the MMX, SSE,
 SSE2, SSE3, SSSE3, SSE4.1, AVX, AVX2, AVX512F, AVX512PF, AVX512ER, AVX512CD,
 SHA, AES, PCLMUL, FSGSBASE, RDRND, F16C, FMA, SSE4A, FMA4, XOP, LWP, ABM,
 AVX512VL, AVX512BW, AVX512DQ, AVX512IFMA AVX512VBMI, BMI, BMI2, FXSR,
-XSAVE, XSAVEOPT, LZCNT, RTM, MPX, MWAITX, PKU, 3DNow!@: or enhanced 3DNow!@:
-extended instruction sets.  Each has a corresponding @option{-mno-} option
-to disable use of these instructions.
+XSAVE, XSAVEOPT, LZCNT, RTM, MPX, MWAITX, PKU, IBT, SHSTK,
+3DNow!@: or enhanced 3DNow!@: extended instruction sets.  Each has a
+corresponding @option{-mno-} option to disable use of these instructions.
 
 These extensions are also available as built-in functions: see
 @ref{x86 Built-in Functions}, for details of the functions enabled and
@@ -25685,6 +25706,10 @@ perform run-time CPU detection must compile separate files for each
 supported architecture, using the appropriate flags.  In particular,
 the file containing the CPU detection code should be compiled without
 these options.
+
+The @option{-mcet} option turns on @option{-mibt} and
+@option{mshstk} options.  Each of these options enables coresponding
+support from x86 Control-flow Enforcment Technology (CET) implementation.
 
 @item -mdump-tune-features
 @opindex mdump-tune-features
@@ -25758,6 +25783,24 @@ see @ref{Other Builtins} for details.
 @opindex mmovbe
 This option enables use of the @code{movbe} instruction to implement
 @code{__builtin_bswap32} and @code{__builtin_bswap64}.
+
+@item -mibt
+@opindex mibt
+This option instructs the compiler to use only indirect branch tracking
+(indirect calls and jumps) support from x86 Control-flow Enforcment
+Technology (CET) implementation, see also @code{-mcet} option.  The
+option has effect only if @code{-finstrument-control-flow} option is
+specified. The option @code{-mibt} is on by default when @code{-mcet}
+option is specified.
+
+@item -mshstk
+@opindex mshstk
+This option instructs compiler to use only shadow stack (return address
+tracking) support from x86 Control-flow Enforcment Technology (CET)
+implementation, see also @code{-mcet} option.  The option has effect
+only if @code{-finstrument-control-flow} option is specified.  The
+option @code{-mshstk} is on by default when @code{-mcet} option is
+specified.
 
 @item -mcrc32
 @opindex mcrc32
