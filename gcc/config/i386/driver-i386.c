@@ -415,6 +415,7 @@ const char *host_detect_local_cpu (int argc, const char **argv)
   unsigned int has_avx512vbmi = 0, has_avx512ifma = 0, has_clwb = 0;
   unsigned int has_mwaitx = 0, has_clzero = 0, has_pku = 0, has_rdpid = 0;
   unsigned int has_avx5124fmaps = 0, has_avx5124vnniw = 0;
+  unsigned int has_ibt = 0, has_shstk = 0;
 
   bool arch;
 
@@ -507,6 +508,9 @@ const char *host_detect_local_cpu (int argc, const char **argv)
 
       has_avx5124vnniw = edx & bit_AVX5124VNNIW;
       has_avx5124fmaps = edx & bit_AVX5124FMAPS;
+
+      has_shstk = ecx & bit_SHSTK;
+      has_ibt = edx & bit_IBT;
     }
 
   if (max_level >= 13)
@@ -1041,6 +1045,8 @@ const char *host_detect_local_cpu (int argc, const char **argv)
       const char *clzero  = has_clzero  ? " -mclzero"  : " -mno-clzero";
       const char *pku = has_pku ? " -mpku" : " -mno-pku";
       const char *rdpid = has_rdpid ? " -mrdpid" : " -mno-rdpid";
+      const char *ibt = has_ibt ? " -mibt" : " -mno-ibt";
+      const char *shstk = has_shstk ? " -mshstk" : " -mno-shstk";
       options = concat (options, mmx, mmx3dnow, sse, sse2, sse3, ssse3,
 			sse4a, cx16, sahf, movbe, aes, sha, pclmul,
 			popcnt, abm, lwp, fma, fma4, xop, bmi, sgx, bmi2,
@@ -1050,7 +1056,7 @@ const char *host_detect_local_cpu (int argc, const char **argv)
 			avx512cd, avx512pf, prefetchwt1, clflushopt,
 			xsavec, xsaves, avx512dq, avx512bw, avx512vl,
 			avx512ifma, avx512vbmi, avx5124fmaps, avx5124vnniw,
-			clwb, mwaitx, clzero, pku, rdpid, NULL);
+			clwb, mwaitx, clzero, pku, rdpid, ibt, shstk, NULL);
     }
 
 done:
