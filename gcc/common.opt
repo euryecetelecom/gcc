@@ -2870,6 +2870,14 @@ gstabs+
 Common Driver JoinedOrMissing Negative(gvms)
 Generate debug information in extended STABS format.
 
+gno-statement-frontiers
+Common Driver RejectNegative Var(debug_statement_frontiers, 0) Init(2)
+Don't enforce progressive recommended breakpoint locations.
+
+gstatement-frontiers
+Common Driver RejectNegative Var(debug_statement_frontiers, 1)
+Emit progressive recommended breakpoint locations.
+
 gno-strict-dwarf
 Common Driver RejectNegative Var(dwarf_strict,0) Init(0)
 Emit DWARF additions beyond selected version.
@@ -2881,6 +2889,14 @@ Don't emit DWARF additions beyond selected version.
 gtoggle
 Common Driver Report Var(flag_gtoggle)
 Toggle debug information generation.
+
+gno-variable-location-views
+Common Driver RejectNegative Var(debug_variable_location_views, 0) Init(2)
+Don't augment variable location lists with progressive views.
+
+gvariable-location-views
+Common Driver RejectNegative Var(debug_variable_location_views, 1)
+Augment variable location lists with progressive views.
 
 gvms
 Common Driver JoinedOrMissing Negative(gxcoff)

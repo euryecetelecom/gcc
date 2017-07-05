@@ -739,6 +739,8 @@ propagate_threaded_block_debug_into (basic_block dest, basic_block src)
 	var = gimple_debug_bind_get_var (stmt);
       else if (gimple_debug_source_bind_p (stmt))
 	var = gimple_debug_source_bind_get_var (stmt);
+      else if (gimple_debug_begin_stmt_p (stmt))
+	continue;
       else
 	gcc_unreachable ();
 
@@ -766,6 +768,8 @@ propagate_threaded_block_debug_into (basic_block dest, basic_block src)
 	    var = gimple_debug_bind_get_var (stmt);
 	  else if (gimple_debug_source_bind_p (stmt))
 	    var = gimple_debug_source_bind_get_var (stmt);
+	  else if (gimple_debug_begin_stmt_p (stmt))
+	    var = NULL;
 	  else
 	    gcc_unreachable ();
 
@@ -777,7 +781,9 @@ propagate_threaded_block_debug_into (basic_block dest, basic_block src)
 	     or somesuch.  Adding `&& bb == src' to the condition
 	     below will preserve all potentially relevant debug
 	     notes.  */
-	  if (vars && vars->add (var))
+	  if (!var)
+	    /* Just copy the stmt.  */;
+	  else if (vars && vars->add (var))
 	    continue;
 	  else if (!vars)
 	    {

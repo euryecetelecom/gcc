@@ -1117,7 +1117,7 @@ try_redirect_by_replacing_jump (edge e, basic_block target, bool in_cfglayout)
       if (tablejump_p (insn, &label, &table))
 	delete_insn_chain (label, table, false);
 
-      barrier = next_nonnote_insn (BB_END (src));
+      barrier = next_nonnote_nondebug_insn (BB_END (src));
       if (!barrier || !BARRIER_P (barrier))
 	emit_barrier_after (BB_END (src));
       else
@@ -1753,7 +1753,7 @@ rtl_tidy_fallthru_edge (edge e)
      the head of block C and assert that we really do fall through.  */
 
   for (q = NEXT_INSN (BB_END (b)); q != BB_HEAD (c); q = NEXT_INSN (q))
-    if (INSN_P (q))
+    if (NONDEBUG_INSN_P (q))
       return;
 
   /* Remove what will soon cease being the jump insn from the source block.
@@ -2272,11 +2272,11 @@ get_last_bb_insn (basic_block bb)
     end = table;
 
   /* Include any barriers that may follow the basic block.  */
-  tmp = next_nonnote_insn_bb (end);
+  tmp = next_nonnote_nondebug_insn_bb (end);
   while (tmp && BARRIER_P (tmp))
     {
       end = tmp;
-      tmp = next_nonnote_insn_bb (end);
+      tmp = next_nonnote_nondebug_insn_bb (end);
     }
 
   return end;
@@ -2893,7 +2893,7 @@ rtl_verify_fallthru (void)
 	  else
 	    for (insn = NEXT_INSN (BB_END (e->src)); insn != BB_HEAD (e->dest);
 		 insn = NEXT_INSN (insn))
-	      if (BARRIER_P (insn) || INSN_P (insn))
+	      if (BARRIER_P (insn) || NONDEBUG_INSN_P (insn))
 		{
 		  error ("verify_flow_info: Incorrect fallthru %i->%i",
 			 e->src->index, e->dest->index);
@@ -2915,7 +2915,7 @@ rtl_verify_bb_layout (void)
 {
   basic_block bb;
   int err = 0;
-  rtx_insn *x;
+  rtx_insn *x, *y;
   int num_bb_notes;
   rtx_insn * const rtx_first = get_insns ();
   basic_block last_bb_seen = ENTRY_BLOCK_PTR_FOR_FN (cfun), curr_bb = NULL;
@@ -2942,6 +2942,7 @@ rtl_verify_bb_layout (void)
 	    {
 	    case BARRIER:
 	    case NOTE:
+	    case DEBUG_INSN:
 	      break;
 
 	    case CODE_LABEL:
@@ -2960,7 +2961,8 @@ rtl_verify_bb_layout (void)
 
       if (JUMP_P (x)
 	  && returnjump_p (x) && ! condjump_p (x)
-	  && ! (next_nonnote_insn (x) && BARRIER_P (next_nonnote_insn (x))))
+	  && ! ((y = next_nonnote_nondebug_insn (x))
+		&& BARRIER_P (y)))
 	    fatal_insn ("return not followed by barrier", x);
 
       if (curr_bb && x == BB_END (curr_bb))
@@ -3379,6 +3381,9 @@ skip_insns_after_block (basic_block bb)
 	{
 	case BARRIER:
 	  last_insn = insn;
+	  continue;
+
+	case DEBUG_INSN:
 	  continue;
 
 	case NOTE:
@@ -4133,7 +4138,8 @@ duplicate_insn_chain (rtx_insn *from, rtx_insn *to)
 	{
 	case DEBUG_INSN:
 	  /* Don't duplicate label debug insns.  */
-	  if (TREE_CODE (INSN_VAR_LOCATION_DECL (insn)) == LABEL_DECL)
+	  if (INSN_VAR_LOCATION_DECL (insn)
+	      && TREE_CODE (INSN_VAR_LOCATION_DECL (insn)) == LABEL_DECL)
 	    break;
 	  /* FALLTHRU */
 	case INSN:

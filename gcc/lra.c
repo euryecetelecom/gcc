@@ -1602,7 +1602,7 @@ lra_update_insn_regno_info (rtx_insn *insn)
     return;
   data = lra_get_insn_recog_data (insn);
   static_data = data->insn_static_data;
-  freq = get_insn_freq (insn);
+  freq = NONDEBUG_INSN_P (insn) ? get_insn_freq (insn) : 0;
   invalidate_insn_data_regno_info (data, insn, freq);
   uid = INSN_UID (insn);
   for (i = static_data->n_operands - 1; i >= 0; i--)
@@ -1812,7 +1812,7 @@ push_insns (rtx_insn *from, rtx_insn *to)
 static void
 setup_sp_offset (rtx_insn *from, rtx_insn *last)
 {
-  rtx_insn *before = next_nonnote_insn_bb (last);
+  rtx_insn *before = next_nonnote_nondebug_insn_bb (last);
   HOST_WIDE_INT offset = (before == NULL_RTX || ! INSN_P (before)
 			  ? 0 : lra_get_insn_recog_data (before)->sp_offset);
 

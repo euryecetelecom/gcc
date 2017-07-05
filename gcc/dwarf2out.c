@@ -83,6 +83,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "toplev.h"
 #include "md5.h"
 #include "tree-pretty-print.h"
+#include "print-rtl.h"
 #include "debug.h"
 #include "common/common-target.h"
 #include "langhooks.h"
@@ -1272,6 +1273,8 @@ struct GTY((for_user)) addr_table_entry {
   GTY ((desc ("%1.kind"))) addr;
 };
 
+typedef unsigned int var_loc_view;
+
 /* Location lists are ranges + location descriptions for that range,
    so you can track variables that are in different places over
    their entire life.  */
@@ -1281,9 +1284,11 @@ typedef struct GTY(()) dw_loc_list_struct {
   addr_table_entry *begin_entry;
   const char *end;  /* Label for end of range */
   char *ll_symbol; /* Label for beginning of location list.
-		      Only on head of list */
+		      Only on head of list.  */
+  char *vl_symbol; /* Label for beginning of view list.  Ditto.  */
   const char *section; /* Section this loclist is relative to */
   dw_loc_descr_ref expr;
+  var_loc_view vbegin, vend;
   hashval_t hash;
   /* True if all addresses in this and subsequent lists are known to be
      resolved.  */
@@ -1318,6 +1323,31 @@ dwarf_stack_op_name (unsigned int op)
     return name;
 
   return "OP_<unknown>";
+}
+
+/* Return TRUE iff we're to output location view lists as a separate
+   attribute next to the location lists, as an extension compatible
+   with DWARF 2 and above.  */
+
+static inline bool
+dwarf2out_locviews_in_attribute ()
+{
+  return debug_variable_location_views
+    && dwarf_version <= 5;
+}
+
+/* Return TRUE iff we're to output location view lists as part of the
+   location lists, as proposed for standardization after DWARF 5.  */
+
+static inline bool
+dwarf2out_locviews_in_loclist ()
+{
+#ifndef DW_LLE_view_pair
+  return false;
+#else
+  return debug_variable_location_views
+    && dwarf_version >= 6;
+#endif
 }
 
 /* Return a pointer to a newly allocated location description.  Location
@@ -1395,6 +1425,8 @@ dw_val_equal_p (dw_val_node *a, dw_val_node *b)
       return a->v.val_loc == b->v.val_loc;
     case dw_val_class_loc_list:
       return a->v.val_loc_list == b->v.val_loc_list;
+    case dw_val_class_view_list:
+      return a->v.val_view_list == b->v.val_view_list;
     case dw_val_class_die_ref:
       return a->v.val_die_ref.die == b->v.val_die_ref.die;
     case dw_val_class_fde_ref:
@@ -2832,7 +2864,15 @@ enum dw_line_info_opcode {
   LI_set_epilogue_begin,
 
   /* Emit a DW_LNE_set_discriminator.  */
-  LI_set_discriminator
+  LI_set_discriminator,
+
+  /* Output a Fixed Advance PC; the target PC is the label index; the
+     base PC is the previous LI_adv_address or LI_set_address entry.
+     We only use this when emitting debug views without assembler
+     support, at explicit user request.  Ideally, we should only use
+     it when the offset might be zero but we can't tell: it's the only
+     way to maybe change the PC without resetting the view number.  */
+  LI_adv_address
 };
 
 typedef struct GTY(()) dw_line_info_struct {
@@ -2853,6 +2893,25 @@ struct GTY(()) dw_line_info_table {
   int discrim_num;
   bool is_stmt;
   bool in_use;
+
+  /* This denotes the NEXT view number.
+
+     If it is 0, it is known that the NEXT view will be the first view
+     at the given PC.
+
+     If it is -1, we've advanced PC but we haven't emitted a line location yet,
+     so we shouldn't use this view number.
+
+     The meaning of other nonzero values depends on whether we're
+     computing views internally or leaving it for the assembler to do
+     so.  If we're emitting them internally, view denotes the view
+     number since the last known advance of PC.  If we're leaving it
+     for the assembler, it denotes the LVU label number that we're
+     going to ask the assembler to assign.  */
+  var_loc_view view;
+
+#define RESET_NEXT_VIEW(x) ((x) = (var_loc_view)0)
+#define RESETTING_VIEW_P(x) ((x) == (var_loc_view)0)
 
   vec<dw_line_info_entry, va_gc> *entries;
 };
@@ -3052,6 +3111,41 @@ skeleton_chain_node;
 #endif
 #endif
 
+/* Use assembler views in line directives if available.  */
+#ifndef DWARF2_ASM_VIEW_DEBUG_INFO
+#ifdef HAVE_AS_DWARF2_DEBUG_VIEW
+#define DWARF2_ASM_VIEW_DEBUG_INFO 1
+#else
+#define DWARF2_ASM_VIEW_DEBUG_INFO 0
+#endif
+#endif
+
+/* A bit is set in ZERO_VIEW_P if we are using the assembler-supported
+   view computation, and it is refers to a view identifier for which
+   will not emit a label because it is known to map to a view number
+   zero.  We won't allocate the bitmap if we're not using assembler
+   support for location views, but we have to make the variable
+   visible for GGC and for code that will be optimized out for lack of
+   support but that's still parsed and compiled.  We could abstract it
+   out with macros, but it's not worth it.  */
+static GTY(()) bitmap zero_view_p;
+
+/* Evaluate to TRUE iff N is known to identify the first location view
+   at its PC.  When not using assembler location view computation,
+   that must be view number zero.  Otherwise, ZERO_VIEW_P is allocated
+   and views label numbers recorded in it are the ones known to be
+   zero.  */
+#define ZERO_VIEW_P(N) (zero_view_p				\
+			? bitmap_bit_p (zero_view_p, (N))	\
+			: (N) == 0)
+
+static bool
+output_asm_line_debug_info (void)
+{
+  return DWARF2_ASM_VIEW_DEBUG_INFO
+    || (DWARF2_ASM_LINE_DEBUG_INFO && !debug_variable_location_views);
+}
+
 /* Minimum line offset in a special line info. opcode.
    This value was chosen to give a reasonable range of values.  */
 #define DWARF_LINE_BASE  -10
@@ -3161,6 +3255,7 @@ struct GTY ((chain_next ("%h.next"))) var_loc_node {
   rtx GTY (()) loc;
   const char * GTY (()) label;
   struct var_loc_node * GTY (()) next;
+  var_loc_view view;
 };
 
 /* Variable location list.  */
@@ -3369,6 +3464,8 @@ static inline dw_loc_descr_ref AT_loc (dw_attr_node *);
 static void add_AT_loc_list (dw_die_ref, enum dwarf_attribute,
 			     dw_loc_list_ref);
 static inline dw_loc_list_ref AT_loc_list (dw_attr_node *);
+static void add_AT_view_list (dw_die_ref, enum dwarf_attribute);
+static inline dw_loc_list_ref AT_loc_list (dw_attr_node *);
 static addr_table_entry *add_addr_table_entry (void *, enum ate_kind);
 static void remove_addr_table_entry (addr_table_entry *);
 static void add_AT_addr (dw_die_ref, enum dwarf_attribute, rtx, bool);
@@ -3405,7 +3502,7 @@ static void equate_type_number_to_die (tree, dw_die_ref);
 static dw_die_ref lookup_decl_die (tree);
 static var_loc_list *lookup_decl_loc (const_tree);
 static void equate_decl_number_to_die (tree, dw_die_ref);
-static struct var_loc_node *add_var_loc_to_decl (tree, rtx, const char *);
+static struct var_loc_node *add_var_loc_to_decl (tree, rtx, const char *, var_loc_view);
 static void print_spaces (FILE *);
 static void print_die (dw_die_ref, FILE *);
 static dw_die_ref push_new_compile_unit (dw_die_ref, dw_die_ref);
@@ -3613,8 +3710,8 @@ static void gen_tagged_type_die (tree, dw_die_ref, enum debug_info_usage);
 static void gen_type_die_with_usage (tree, dw_die_ref, enum debug_info_usage);
 static void splice_child_die (dw_die_ref, dw_die_ref);
 static int file_info_cmp (const void *, const void *);
-static dw_loc_list_ref new_loc_list (dw_loc_descr_ref, const char *,
-				     const char *, const char *);
+static dw_loc_list_ref new_loc_list (dw_loc_descr_ref, const char *, var_loc_view,
+				     const char *, var_loc_view, const char *);
 static void output_loc_list (dw_loc_list_ref);
 static char *gen_internal_sym (const char *);
 static bool want_pubnames (void);
@@ -4536,11 +4633,55 @@ AT_loc_list (dw_attr_node *a)
   return a->dw_attr_val.v.val_loc_list;
 }
 
+static inline void
+add_AT_view_list (dw_die_ref die, enum dwarf_attribute attr_kind)
+{
+  dw_attr_node attr;
+
+  if (XCOFF_DEBUGGING_INFO && !HAVE_XCOFF_DWARF_EXTRAS)
+    return;
+
+  attr.dw_attr = attr_kind;
+  attr.dw_attr_val.val_class = dw_val_class_view_list;
+  attr.dw_attr_val.val_entry = NULL;
+  attr.dw_attr_val.v.val_view_list = die;
+  add_dwarf_attr (die, &attr);
+  gcc_checking_assert (get_AT (die, DW_AT_location));
+  gcc_assert (have_location_lists);
+}
+
 static inline dw_loc_list_ref *
 AT_loc_list_ptr (dw_attr_node *a)
 {
-  gcc_assert (a && AT_class (a) == dw_val_class_loc_list);
-  return &a->dw_attr_val.v.val_loc_list;
+  gcc_assert (a);
+  switch (AT_class (a))
+    {
+    case dw_val_class_loc_list:
+      return &a->dw_attr_val.v.val_loc_list;
+    case dw_val_class_view_list:
+      {
+	dw_attr_node *l;
+	l = get_AT (a->dw_attr_val.v.val_view_list, DW_AT_location);
+	if (!l)
+	  return NULL;
+	gcc_checking_assert (l + 1 == a);
+	return AT_loc_list_ptr (l);
+      }
+    default:
+      gcc_unreachable ();
+    }
+}
+
+static inline dw_val_node *
+view_list_to_loc_list_val_node (dw_val_node *val)
+{
+  gcc_assert (val->val_class == dw_val_class_view_list);
+  dw_attr_node *loc = get_AT (val->v.val_view_list, DW_AT_location);
+  if (!loc)
+    return NULL;
+  gcc_checking_assert (&(loc + 1)->dw_attr_val == val);
+  gcc_assert (AT_class (loc) == dw_val_class_loc_list);
+  return &loc->dw_attr_val;
 }
 
 struct addr_hasher : ggc_ptr_hash<addr_table_entry>
@@ -5612,7 +5753,7 @@ adjust_piece_list (rtx *dest, rtx *src, rtx *inner,
 /* Add a variable location node to the linked list for DECL.  */
 
 static struct var_loc_node *
-add_var_loc_to_decl (tree decl, rtx loc_note, const char *label)
+add_var_loc_to_decl (tree decl, rtx loc_note, const char *label, var_loc_view view)
 {
   unsigned int decl_id;
   var_loc_list *temp;
@@ -5703,7 +5844,7 @@ add_var_loc_to_decl (tree decl, rtx loc_note, const char *label)
       /* TEMP->LAST here is either pointer to the last but one or
 	 last element in the chained list, LAST is pointer to the
 	 last element.  */
-      if (label && strcmp (last->label, label) == 0)
+      if (label && strcmp (last->label, label) == 0 && last->view == view)
 	{
 	  /* For SRA optimized variables if there weren't any real
 	     insns since last note, just modify the last node.  */
@@ -5719,7 +5860,7 @@ add_var_loc_to_decl (tree decl, rtx loc_note, const char *label)
 	      temp->last->next = NULL;
 	      unused = last;
 	      last = temp->last;
-	      gcc_assert (strcmp (last->label, label) != 0);
+	      gcc_assert (strcmp (last->label, label) != 0 || last->view != view);
 	    }
 	  else
 	    {
@@ -5853,6 +5994,12 @@ print_dw_val (dw_val_node *val, bool recurse, FILE *outfile)
     case dw_val_class_loc_list:
       fprintf (outfile, "location list -> label:%s",
 	       val->v.val_loc_list->ll_symbol);
+      break;
+    case dw_val_class_view_list:
+      val = view_list_to_loc_list_val_node (val);
+      fprintf (outfile, "location list with views -> labels:%s and %s",
+	       val->v.val_loc_list->ll_symbol,
+	       val->v.val_loc_list->vl_symbol);
       break;
     case dw_val_class_range_list:
       fprintf (outfile, "range list");
@@ -8953,6 +9100,7 @@ size_of_die (dw_die_ref die)
 	  }
 	  break;
 	case dw_val_class_loc_list:
+	case dw_val_class_view_list:
 	  if (dwarf_split_debug_info && dwarf_version >= 5)
 	    {
 	      gcc_assert (AT_loc_list (a)->num_assigned);
@@ -9324,6 +9472,7 @@ value_format (dw_attr_node *a)
 	  gcc_unreachable ();
 	}
     case dw_val_class_loc_list:
+    case dw_val_class_view_list:
       if (dwarf_split_debug_info
 	  && dwarf_version >= 5
 	  && AT_loc_list (a)->num_assigned)
@@ -9619,7 +9768,8 @@ output_die_symbol (dw_die_ref die)
    expression.  */
 
 static inline dw_loc_list_ref
-new_loc_list (dw_loc_descr_ref expr, const char *begin, const char *end,
+new_loc_list (dw_loc_descr_ref expr, const char *begin, var_loc_view vbegin,
+	      const char *end, var_loc_view vend,
 	      const char *section)
 {
   dw_loc_list_ref retlist = ggc_cleared_alloc<dw_loc_list_node> ();
@@ -9629,8 +9779,26 @@ new_loc_list (dw_loc_descr_ref expr, const char *begin, const char *end,
   retlist->end = end;
   retlist->expr = expr;
   retlist->section = section;
+  retlist->vbegin = vbegin;
+  retlist->vend = vend;
 
   return retlist;
+}
+
+/* Return true iff there's any nonzero view number in the loc list.  */
+
+static bool
+loc_list_has_views (dw_loc_list_ref list)
+{
+  if (!debug_variable_location_views)
+    return false;
+
+  for (dw_loc_list_ref loc = list;
+       loc != NULL; loc = loc->dw_loc_next)
+    if (!ZERO_VIEW_P (loc->vbegin) || !ZERO_VIEW_P (loc->vend))
+      return true;
+
+  return false;
 }
 
 /* Generate a new internal symbol for this location list node, if it
@@ -9641,6 +9809,94 @@ gen_llsym (dw_loc_list_ref list)
 {
   gcc_assert (!list->ll_symbol);
   list->ll_symbol = gen_internal_sym ("LLST");
+
+  if (!loc_list_has_views (list))
+    return;
+
+  if (dwarf2out_locviews_in_attribute ())
+    {
+      /* Use the same label_num for the view list.  */
+      label_num--;
+      list->vl_symbol = gen_internal_sym ("LVUS");
+    }
+  else
+    list->vl_symbol = list->ll_symbol;
+}
+
+/* Generate a symbol for the list, but only if we really want to emit
+   it as a list.  */
+
+static inline void
+maybe_gen_llsym (dw_loc_list_ref list)
+{
+  if (!list || (!list->dw_loc_next && !loc_list_has_views (list)))
+    return;
+
+  gen_llsym (list);
+}
+
+/* Determine whether or not to skip loc_list entry CURR.  If we're not
+   to skip it, and SIZEP is non-null, store the size of CURR->expr's
+   representation in *SIZEP.  */
+
+static bool
+skip_loc_list_entry (dw_loc_list_ref curr, unsigned long *sizep = 0)
+{
+  /* Don't output an entry that starts and ends at the same address.  */
+  if (strcmp (curr->begin, curr->end) == 0
+      && curr->vbegin == curr->vend && !curr->force)
+    return true;
+
+  unsigned long size = size_of_locs (curr->expr);
+
+  /* If the expression is too large, drop it on the floor.  We could
+     perhaps put it into DW_TAG_dwarf_procedure and refer to that
+     in the expression, but >= 64KB expressions for a single value
+     in a single range are unlikely very useful.  */
+  if (dwarf_version < 5 && size > 0xffff)
+    return true;
+
+  if (sizep)
+    *sizep = size;
+
+  return false;
+}
+
+/* Output a view pair loclist entry for CURR, if it requires one.  */
+
+static void
+dwarf2out_maybe_output_loclist_view_pair (dw_loc_list_ref curr)
+{
+  if (!dwarf2out_locviews_in_loclist ())
+    return;
+
+  if (ZERO_VIEW_P (curr->vbegin) && ZERO_VIEW_P (curr->vend))
+    return;
+
+#ifdef DW_LLE_view_pair
+  dw2_asm_output_data (1, DW_LLE_view_pair,
+		       "DW_LLE_view_pair");
+
+  if (ZERO_VIEW_P (curr->vbegin))
+    dw2_asm_output_data_uleb128 (0, "Location view begin");
+  else
+    {
+      char label[MAX_ARTIFICIAL_LABEL_BYTES];
+      ASM_GENERATE_INTERNAL_LABEL (label, "LVU", curr->vbegin);
+      dw2_asm_output_symname_uleb128 (label, "Location view begin");
+    }
+
+  if (ZERO_VIEW_P (curr->vend))
+    dw2_asm_output_data_uleb128 (0, "Location view end");
+  else
+    {
+      char label[MAX_ARTIFICIAL_LABEL_BYTES];
+      ASM_GENERATE_INTERNAL_LABEL (label, "LVU", curr->vend);
+      dw2_asm_output_symname_uleb128 (label, "Location view end");
+    }
+#endif
+
+  return;
 }
 
 /* Output the location list given to us.  */
@@ -9648,34 +9904,85 @@ gen_llsym (dw_loc_list_ref list)
 static void
 output_loc_list (dw_loc_list_ref list_head)
 {
+  int vcount = 0, lcount = 0;
+
   if (list_head->emitted)
     return;
   list_head->emitted = true;
 
+  if (list_head->vl_symbol && dwarf2out_locviews_in_attribute ())
+    {
+      ASM_OUTPUT_LABEL (asm_out_file, list_head->vl_symbol);
+
+      for (dw_loc_list_ref curr = list_head; curr != NULL;
+	   curr = curr->dw_loc_next)
+	{
+	  if (skip_loc_list_entry (curr))
+	    continue;
+
+	  vcount++;
+
+	  /* ?? dwarf_split_debug_info?  */
+#if DWARF2_ASM_VIEW_DEBUG_INFO
+	  char label[MAX_ARTIFICIAL_LABEL_BYTES];
+
+	  if (!ZERO_VIEW_P (curr->vbegin))
+	    {
+	      ASM_GENERATE_INTERNAL_LABEL (label, "LVU", curr->vbegin);
+	      dw2_asm_output_symname_uleb128 (label,
+					      "View list begin (%s)",
+					      list_head->vl_symbol);
+	    }
+	  else
+	    dw2_asm_output_data_uleb128 (0,
+					 "View list begin (%s)",
+					 list_head->vl_symbol);
+
+	  if (!ZERO_VIEW_P (curr->vend))
+	    {
+	      ASM_GENERATE_INTERNAL_LABEL (label, "LVU", curr->vend);
+	      dw2_asm_output_symname_uleb128 (label,
+					      "View list end (%s)",
+					      list_head->vl_symbol);
+	    }
+	  else
+	    dw2_asm_output_data_uleb128 (0,
+					 "View list end (%s)",
+					 list_head->vl_symbol);
+#else /* !DWARF2_ASM_VIEW_DEBUG_INFO */
+	  dw2_asm_output_data_uleb128 (curr->vbegin,
+				       "View list begin (%s)",
+				       list_head->vl_symbol);
+	  dw2_asm_output_data_uleb128 (curr->vend,
+				       "View list end (%s)",
+				       list_head->vl_symbol);
+#endif
+	}
+    }
+
   ASM_OUTPUT_LABEL (asm_out_file, list_head->ll_symbol);
 
-  dw_loc_list_ref curr = list_head;
   const char *last_section = NULL;
   const char *base_label = NULL;
 
   /* Walk the location list, and output each range + expression.  */
-  for (curr = list_head; curr != NULL; curr = curr->dw_loc_next)
+  for (dw_loc_list_ref curr = list_head; curr != NULL;
+       curr = curr->dw_loc_next)
     {
       unsigned long size;
-      /* Don't output an entry that starts and ends at the same address.  */
-      if (strcmp (curr->begin, curr->end) == 0 && !curr->force)
+
+      /* Skip this entry?  If we skip it here, we must skip it in the
+	 view list above as well. */
+      if (skip_loc_list_entry (curr, &size))
 	continue;
-      size = size_of_locs (curr->expr);
-      /* If the expression is too large, drop it on the floor.  We could
-	 perhaps put it into DW_TAG_dwarf_procedure and refer to that
-	 in the expression, but >= 64KB expressions for a single value
-	 in a single range are unlikely very useful.  */
-      if (dwarf_version < 5 && size > 0xffff)
-	continue;
+
+      lcount++;
+
       if (dwarf_version >= 5)
 	{
 	  if (dwarf_split_debug_info)
 	    {
+	      dwarf2out_maybe_output_loclist_view_pair (curr);
 	      /* For -gsplit-dwarf, emit DW_LLE_starx_length, which has
 		 uleb128 index into .debug_addr and uleb128 length.  */
 	      dw2_asm_output_data (1, DW_LLE_startx_length,
@@ -9693,6 +10000,7 @@ output_loc_list (dw_loc_list_ref list_head)
 	    }
 	  else if (!have_multiple_function_sections && HAVE_AS_LEB128)
 	    {
+	      dwarf2out_maybe_output_loclist_view_pair (curr);
 	      /* If all code is in .text section, the base address is
 		 already provided by the CU attributes.  Use
 		 DW_LLE_offset_pair where both addresses are uleb128 encoded
@@ -9743,6 +10051,7 @@ output_loc_list (dw_loc_list_ref list_head)
 		 length.  */
 	      if (last_section == NULL)
 		{
+		  dwarf2out_maybe_output_loclist_view_pair (curr);
 		  dw2_asm_output_data (1, DW_LLE_start_length,
 				       "DW_LLE_start_length (%s)",
 				       list_head->ll_symbol);
@@ -9757,6 +10066,7 @@ output_loc_list (dw_loc_list_ref list_head)
 		 DW_LLE_base_address.  */
 	      else
 		{
+		  dwarf2out_maybe_output_loclist_view_pair (curr);
 		  dw2_asm_output_data (1, DW_LLE_offset_pair,
 				       "DW_LLE_offset_pair (%s)",
 				       list_head->ll_symbol);
@@ -9772,6 +10082,7 @@ output_loc_list (dw_loc_list_ref list_head)
 	     DW_LLE_start_end with a pair of absolute addresses.  */
 	  else
 	    {
+	      dwarf2out_maybe_output_loclist_view_pair (curr);
 	      dw2_asm_output_data (1, DW_LLE_start_end,
 				   "DW_LLE_start_end (%s)",
 				   list_head->ll_symbol);
@@ -9850,6 +10161,9 @@ output_loc_list (dw_loc_list_ref list_head)
 			   "Location list terminator end (%s)",
 			   list_head->ll_symbol);
     }
+
+  gcc_assert (!list_head->vl_symbol
+	      || vcount == lcount * (dwarf2out_locviews_in_attribute () ? 1 : 0));
 }
 
 /* Output a range_list offset into the .debug_ranges or .debug_rnglists
@@ -9912,6 +10226,22 @@ output_loc_list_offset (dw_attr_node *a)
   else
     dw2_asm_output_delta (DWARF_OFFSET_SIZE, sym, loc_section_label,
 			  "%s", dwarf_attr_name (a->dw_attr));
+}
+
+/* Output the offset into the debug_loc section.  */
+
+static void
+output_view_list_offset (dw_attr_node *a)
+{
+  char *sym = (*AT_loc_list_ptr (a))->vl_symbol;
+
+  gcc_assert (sym);
+  if (dwarf_split_debug_info)
+    dw2_asm_output_delta (DWARF_OFFSET_SIZE, sym, loc_section_label,
+                          "%s", dwarf_attr_name (a->dw_attr));
+  else
+    dw2_asm_output_offset (DWARF_OFFSET_SIZE, sym, debug_loc_section,
+                           "%s", dwarf_attr_name (a->dw_attr));
 }
 
 /* Output an attribute's index or value appropriately.  */
@@ -10142,6 +10472,10 @@ output_die (dw_die_ref die)
 
 	case dw_val_class_loc_list:
 	  output_loc_list_offset (a);
+	  break;
+
+	case dw_val_class_view_list:
+	  output_view_list_offset (a);
 	  break;
 
 	case dw_val_class_die_ref:
@@ -11797,8 +12131,11 @@ output_one_line_info_table (dw_line_info_table *table)
   char line_label[MAX_ARTIFICIAL_LABEL_BYTES];
   unsigned int current_line = 1;
   bool current_is_stmt = DWARF_LINE_DEFAULT_IS_STMT_START;
-  dw_line_info_entry *ent;
+  dw_line_info_entry *ent, *prev_addr;
   size_t i;
+  unsigned int view;
+
+  view = 0;
 
   FOR_EACH_VEC_SAFE_ELT (table->entries, i, ent)
     {
@@ -11813,13 +12150,35 @@ output_one_line_info_table (dw_line_info_table *table)
 	     to determine when it is safe to use DW_LNS_fixed_advance_pc.  */
 	  ASM_GENERATE_INTERNAL_LABEL (line_label, LINE_CODE_LABEL, ent->val);
 
+	  view = 0;
+
 	  /* This can handle any delta.  This takes
 	     4+DWARF2_ADDR_SIZE bytes.  */
-	  dw2_asm_output_data (1, 0, "set address %s", line_label);
+	  dw2_asm_output_data (1, 0, "set address %s%s", line_label,
+			       debug_variable_location_views
+			       ? ", reset view to 0" : "");
 	  dw2_asm_output_data_uleb128 (1 + DWARF2_ADDR_SIZE, NULL);
 	  dw2_asm_output_data (1, DW_LNE_set_address, NULL);
 	  dw2_asm_output_addr (DWARF2_ADDR_SIZE, line_label, NULL);
+
+	  prev_addr = ent;
 	  break;
+
+	case LI_adv_address:
+	  {
+	    ASM_GENERATE_INTERNAL_LABEL (line_label, LINE_CODE_LABEL, ent->val);
+	    char prev_label[MAX_ARTIFICIAL_LABEL_BYTES];
+	    ASM_GENERATE_INTERNAL_LABEL (prev_label, LINE_CODE_LABEL, prev_addr->val);
+
+	    view++;
+
+	    dw2_asm_output_data (1, DW_LNS_fixed_advance_pc, "fixed advance PC, increment view to %i", view);
+	    dw2_asm_output_delta (2, line_label, prev_label,
+				  "from %s to %s", prev_label, line_label);
+
+	    prev_addr = ent;
+	    break;
+	  }
 
 	case LI_set_line:
 	  if (ent->val == current_line)
@@ -16212,6 +16571,7 @@ static dw_loc_list_ref
 dw_loc_list (var_loc_list *loc_list, tree decl, int want_address)
 {
   const char *endname, *secname;
+  var_loc_view endview;
   rtx varloc;
   enum var_init_status initialized;
   struct var_loc_node *node;
@@ -16267,24 +16627,27 @@ dw_loc_list (var_loc_list *loc_list, tree decl, int want_address)
 		&& current_function_decl)
 	      {
 		endname = cfun->fde->dw_fde_end;
+		endview = 0;
 		range_across_switch = true;
 	      }
 	    /* The variable has a location between NODE->LABEL and
 	       NODE->NEXT->LABEL.  */
 	    else if (node->next)
-	      endname = node->next->label;
+	      endname = node->next->label, endview = node->next->view;
 	    /* If the variable has a location at the last label
 	       it keeps its location until the end of function.  */
 	    else if (!current_function_decl)
-	      endname = text_end_label;
+	      endname = text_end_label, endview = 0;
 	    else
 	      {
 		ASM_GENERATE_INTERNAL_LABEL (label_id, FUNC_END_LABEL,
 					     current_function_funcdef_no);
 		endname = ggc_strdup (label_id);
+		endview = 0;
 	      }
 
-	    *listp = new_loc_list (descr, node->label, endname, secname);
+	    *listp = new_loc_list (descr, node->label, node->view,
+				   endname, endview, secname);
 	    if (TREE_CODE (decl) == PARM_DECL
 		&& node == loc_list->first
 		&& NOTE_P (node->loc)
@@ -16307,12 +16670,12 @@ dw_loc_list (var_loc_list *loc_list, tree decl, int want_address)
 		/* The variable has a location between NODE->LABEL and
 		   NODE->NEXT->LABEL.  */
 		if (node->next)
-		  endname = node->next->label;
+		  endname = node->next->label, endview = node->next->view;
 		else
-		  endname = cfun->fde->dw_fde_second_end;
+		  endname = cfun->fde->dw_fde_second_end, endview = 0;
 		*listp = new_loc_list (descr,
-				       cfun->fde->dw_fde_second_begin,
-				       endname, secname);
+				       cfun->fde->dw_fde_second_begin, 0,
+				       endname, endview, secname);
 		listp = &(*listp)->dw_loc_next;
 	      }
 	  }
@@ -16324,8 +16687,7 @@ dw_loc_list (var_loc_list *loc_list, tree decl, int want_address)
      representable, we don't want to pretend a single entry that was
      applies to the entire scope in which the variable is
      available.  */
-  if (list && loc_list->first->next)
-    gen_llsym (list);
+  maybe_gen_llsym (list);
 
   return list;
 }
@@ -17145,7 +17507,7 @@ loc_list_from_tree_1 (tree loc, int want_address,
     {
       if (dwarf_version >= 3 || !dwarf_strict)
 	return new_loc_list (new_loc_descr (DW_OP_push_object_address, 0, 0),
-			     NULL, NULL, NULL);
+			     NULL, 0, NULL, 0, NULL);
       else
 	return NULL;
     }
@@ -17958,7 +18320,7 @@ loc_list_from_tree_1 (tree loc, int want_address,
 	add_loc_descr_to_each (list_ret, new_loc_descr (op, size, 0));
     }
   if (ret)
-    list_ret = new_loc_list (ret, NULL, NULL, NULL);
+    list_ret = new_loc_list (ret, NULL, 0, NULL, 0, NULL);
 
   return list_ret;
 }
@@ -18287,7 +18649,13 @@ add_AT_location_description (dw_die_ref die, enum dwarf_attribute attr_kind,
   if (single_element_loc_list_p (descr))
     add_AT_loc (die, attr_kind, descr->expr);
   else
-    add_AT_loc_list (die, attr_kind, descr);
+    {
+      add_AT_loc_list (die, attr_kind, descr);
+      gcc_assert (descr->ll_symbol);
+      if (attr_kind == DW_AT_location && descr->vl_symbol
+	  && dwarf2out_locviews_in_attribute ())
+	add_AT_view_list (die, DW_AT_GNU_locviews);
+    }
 }
 
 /* Add DW_AT_accessibility attribute to DIE if needed.  */
@@ -19457,7 +19825,7 @@ convert_cfa_to_fb_loc_list (HOST_WIDE_INT offset)
       /* If the first partition contained no CFI adjustments, the
 	 CIE opcodes apply to the whole first partition.  */
       *list_tail = new_loc_list (build_cfa_loc (&last_cfa, offset),
-				 fde->dw_fde_begin, fde->dw_fde_end, section);
+				 fde->dw_fde_begin, 0, fde->dw_fde_end, 0, section);
       list_tail =&(*list_tail)->dw_loc_next;
       start_label = last_label = fde->dw_fde_second_begin;
     }
@@ -19473,7 +19841,7 @@ convert_cfa_to_fb_loc_list (HOST_WIDE_INT offset)
 	  if (!cfa_equal_p (&last_cfa, &next_cfa))
 	    {
 	      *list_tail = new_loc_list (build_cfa_loc (&last_cfa, offset),
-					 start_label, last_label, section);
+					 start_label, 0, last_label, 0, section);
 
 	      list_tail = &(*list_tail)->dw_loc_next;
 	      last_cfa = next_cfa;
@@ -19495,14 +19863,14 @@ convert_cfa_to_fb_loc_list (HOST_WIDE_INT offset)
 	  if (!cfa_equal_p (&last_cfa, &next_cfa))
 	    {
 	      *list_tail = new_loc_list (build_cfa_loc (&last_cfa, offset),
-					 start_label, last_label, section);
+					 start_label, 0, last_label, 0, section);
 
 	      list_tail = &(*list_tail)->dw_loc_next;
 	      last_cfa = next_cfa;
 	      start_label = last_label;
 	    }
 	  *list_tail = new_loc_list (build_cfa_loc (&last_cfa, offset),
-				     start_label, fde->dw_fde_end, section);
+				     start_label, 0, fde->dw_fde_end, 0, section);
 	  list_tail = &(*list_tail)->dw_loc_next;
 	  start_label = last_label = fde->dw_fde_second_begin;
 	}
@@ -19511,19 +19879,18 @@ convert_cfa_to_fb_loc_list (HOST_WIDE_INT offset)
   if (!cfa_equal_p (&last_cfa, &next_cfa))
     {
       *list_tail = new_loc_list (build_cfa_loc (&last_cfa, offset),
-				 start_label, last_label, section);
+				 start_label, 0, last_label, 0, section);
       list_tail = &(*list_tail)->dw_loc_next;
       start_label = last_label;
     }
 
   *list_tail = new_loc_list (build_cfa_loc (&next_cfa, offset),
-			     start_label,
+			     start_label, 0,
 			     fde->dw_fde_second_begin
-			     ? fde->dw_fde_second_end : fde->dw_fde_end,
+			     ? fde->dw_fde_second_end : fde->dw_fde_end, 0,
 			     section);
 
-  if (list && list->dw_loc_next)
-    gen_llsym (list);
+  maybe_gen_llsym (list);
 
   return list;
 }
@@ -25946,7 +26313,7 @@ maybe_emit_file (struct dwarf_file_data * fd)
 	fd->emitted_number = 1;
       last_emitted_file = fd;
 
-      if (DWARF2_ASM_LINE_DEBUG_INFO)
+      if (output_asm_line_debug_info ())
 	{
 	  fprintf (asm_out_file, "\t.file %u ", fd->emitted_number);
 	  output_quoted_string (asm_out_file,
@@ -26106,6 +26473,22 @@ static bool maybe_at_text_label_p = true;
 /* One above highest N where .LVLN label might be equal to .Ltext0 label.  */
 static unsigned int first_loclabel_num_not_at_text_label;
 
+/* Look ahead for a real insn, or for a begin stmt marker.  */
+
+static rtx_insn *
+dwarf2out_next_real_insn (rtx_insn *loc_note)
+{
+  rtx_insn *next_real = NEXT_INSN (loc_note);
+
+  while (next_real)
+    if (INSN_P (next_real))
+      break;
+    else
+      next_real = NEXT_INSN (next_real);
+
+  return next_real;
+}
+
 /* Called by the final INSN scan whenever we see a var location.  We
    use it to drop labels in the right places, and throw the location in
    our lookup table.  */
@@ -26123,11 +26506,13 @@ dwarf2out_var_location (rtx_insn *loc_note)
   static rtx_insn *expected_next_loc_note;
   tree decl;
   bool var_loc_p;
+  var_loc_view view = 0;
 
   if (!NOTE_P (loc_note))
     {
       if (CALL_P (loc_note))
 	{
+	  RESET_NEXT_VIEW (cur_line_info_table->view);
 	  call_site_count++;
 	  if (SIBLING_CALL_P (loc_note))
 	    tail_call_site_count++;
@@ -26154,13 +26539,25 @@ dwarf2out_var_location (rtx_insn *loc_note)
 		  loc_note = NULL;
 		  var_loc_p = false;
 
-		  next_real = next_real_insn (call_insn);
+		  next_real = dwarf2out_next_real_insn (call_insn);
 		  next_note = NULL;
 		  cached_next_real_insn = NULL;
 		  goto create_label;
 		}
 	    }
 	}
+      else if (!debug_variable_location_views)
+	gcc_unreachable ();
+      else if (JUMP_TABLE_DATA_P (loc_note))
+	RESET_NEXT_VIEW (cur_line_info_table->view);
+      else if (GET_CODE (loc_note) == USE
+	       || GET_CODE (loc_note) == CLOBBER
+	       || GET_CODE (loc_note) == ASM_INPUT
+	       || asm_noperands (loc_note) >= 0)
+	;
+      else if (get_attr_min_length (loc_note) > 0)
+	RESET_NEXT_VIEW (cur_line_info_table->view);
+
       return;
     }
 
@@ -26184,11 +26581,12 @@ dwarf2out_var_location (rtx_insn *loc_note)
       || next_note->deleted ()
       || ! NOTE_P (next_note)
       || (NOTE_KIND (next_note) != NOTE_INSN_VAR_LOCATION
+	  && NOTE_KIND (next_note) != NOTE_INSN_BEGIN_STMT
 	  && NOTE_KIND (next_note) != NOTE_INSN_CALL_ARG_LOCATION))
     next_note = NULL;
 
   if (! next_real)
-    next_real = next_real_insn (loc_note);
+    next_real = dwarf2out_next_real_insn (loc_note);
 
   if (next_note)
     {
@@ -26223,10 +26621,11 @@ create_label:
 
   if (var_loc_p)
     {
+      const char *label = NOTE_DURING_CALL_P (loc_note)
+	? last_postcall_label : last_label;
+      view = cur_line_info_table->view;
       decl = NOTE_VAR_LOCATION_DECL (loc_note);
-      newloc = add_var_loc_to_decl (decl, loc_note,
-				    NOTE_DURING_CALL_P (loc_note)
-				    ? last_postcall_label : last_label);
+      newloc = add_var_loc_to_decl (decl, loc_note, label, view);
       if (newloc == NULL)
 	return;
     }
@@ -26267,8 +26666,8 @@ create_label:
 		else if (GET_CODE (body) == ASM_INPUT
 			 || asm_noperands (body) >= 0)
 		  continue;
-#ifdef HAVE_attr_length
-		else if (get_attr_min_length (insn) == 0)
+#ifdef HAVE_ATTR_length /* ??? We don't include insn-attr.h.  */
+		else if (HAVE_ATTR_length && get_attr_min_length (insn) == 0)
 		  continue;
 #endif
 		else
@@ -26336,7 +26735,10 @@ create_label:
       call_arg_loc_last = ca_loc;
     }
   else if (loc_note != NULL_RTX && !NOTE_DURING_CALL_P (loc_note))
-    newloc->label = last_label;
+    {
+      newloc->label = last_label;
+      newloc->view = view;
+    }
   else
     {
       if (!last_postcall_label)
@@ -26345,6 +26747,23 @@ create_label:
 	  last_postcall_label = ggc_strdup (loclabel);
 	}
       newloc->label = last_postcall_label;
+      newloc->view = view;
+    }
+
+  if (var_loc_p && flag_debug_asm)
+    {
+      const char *name = NULL, *sep = " => ", *patstr = NULL;
+      if (decl && DECL_NAME (decl))
+	name = IDENTIFIER_POINTER (DECL_NAME (decl));
+      if (NOTE_VAR_LOCATION_LOC (loc_note))
+	patstr = str_pattern_slim (NOTE_VAR_LOCATION_LOC (loc_note));
+      else
+	{
+	  sep = " ";
+	  patstr = "RESET";
+	}
+      fprintf (asm_out_file, "\t%s DEBUG %s%s%s\n", ASM_COMMENT_START,
+	       name, sep, patstr);
     }
 
   last_var_location_insn = next_real;
@@ -26395,6 +26814,7 @@ new_line_info_table (void)
   table->file_num = 1;
   table->line_num = 1;
   table->is_stmt = DWARF_LINE_DEFAULT_IS_STMT_START;
+  RESET_NEXT_VIEW (table->view);
 
   return table;
 }
@@ -26443,7 +26863,7 @@ set_cur_line_info_table (section *sec)
       vec_safe_push (separate_line_info, table);
     }
 
-  if (DWARF2_ASM_LINE_DEBUG_INFO)
+  if (output_asm_line_debug_info ())
     table->is_stmt = (cur_line_info_table
 		      ? cur_line_info_table->is_stmt
 		      : DWARF_LINE_DEFAULT_IS_STMT_START);
@@ -26624,7 +27044,7 @@ dwarf2out_source_line (unsigned int line, unsigned int column,
 		 filename, line);
     }
 
-  if (DWARF2_ASM_LINE_DEBUG_INFO)
+  if (output_asm_line_debug_info ())
     {
       /* Emit the .loc directive understood by GNU as.  */
       /* "\t.loc %u %u 0 is_stmt %u discriminator %u",
@@ -26650,6 +27070,33 @@ dwarf2out_source_line (unsigned int line, unsigned int column,
 	  fputs (" discriminator ", asm_out_file);
 	  fprint_ul (asm_out_file, (unsigned long) discriminator);
 	}
+      if (debug_variable_location_views)
+	{
+	  static var_loc_view lvugid;
+	  if (!lvugid)
+	    {
+	      gcc_assert (!zero_view_p);
+	      zero_view_p = BITMAP_GGC_ALLOC ();
+	      bitmap_set_bit (zero_view_p, 0);
+	    }
+	  if (RESETTING_VIEW_P (table->view))
+	    {
+	      if (!table->in_use)
+		fputs (" view -0", asm_out_file);
+	      else
+		fputs (" view 0", asm_out_file);
+	      bitmap_set_bit (zero_view_p, lvugid);
+	      table->view = ++lvugid;
+	    }
+	  else
+	    {
+	      fputs (" view ", asm_out_file);
+	      char label[MAX_ARTIFICIAL_LABEL_BYTES];
+	      ASM_GENERATE_INTERNAL_LABEL (label, "LVU", table->view);
+	      assemble_name (asm_out_file, label);
+	      table->view = ++lvugid;
+	    }
+	}
       putc ('\n', asm_out_file);
     }
   else
@@ -26658,7 +27105,19 @@ dwarf2out_source_line (unsigned int line, unsigned int column,
 
       targetm.asm_out.internal_label (asm_out_file, LINE_CODE_LABEL, label_num);
 
-      push_dw_line_info_entry (table, LI_set_address, label_num);
+      if (debug_variable_location_views && table->view)
+	push_dw_line_info_entry (table, LI_adv_address, label_num);
+      else
+	push_dw_line_info_entry (table, LI_set_address, label_num);
+      if (debug_variable_location_views)
+	{
+	  if (flag_debug_asm)
+	    fprintf (asm_out_file, "\t%s view %s%d\n",
+		     ASM_COMMENT_START,
+		     table->in_use ? "" : "-",
+		     table->view);
+	  table->view++;
+	}
       if (file_num != table->file_num)
 	push_dw_line_info_entry (table, LI_set_file, file_num);
       if (discriminator != table->discrim_num)
@@ -27240,7 +27699,7 @@ init_sections_and_labels (void)
 					SECTION_DEBUG, NULL);
   debug_str_section = get_section (DEBUG_STR_SECTION,
 				   DEBUG_STR_SECTION_FLAGS, NULL);
-  if (!dwarf_split_debug_info && !DWARF2_ASM_LINE_DEBUG_INFO)
+  if (!dwarf_split_debug_info && !output_asm_line_debug_info ())
     debug_line_str_section = get_section (DEBUG_LINE_STR_SECTION,
 					  DEBUG_STR_SECTION_FLAGS, NULL);
 
@@ -27623,6 +28082,11 @@ prune_unused_types_walk_attribs (dw_die_ref die)
 	       list != NULL;
 	       list = list->dw_loc_next)
 	    prune_unused_types_walk_loc_descr (list->expr);
+	  break;
+
+	case dw_val_class_view_list:
+	  /* This points to a loc_list in another attribute, so it's
+	     already covered.  */
 	  break;
 
 	case dw_val_class_die_ref:
@@ -28724,6 +29188,8 @@ optimize_string_length (dw_attr_node *a)
 	if (d->expr && non_dwarf_expression (d->expr))
 	  non_dwarf_expr = true;
       break;
+    case dw_val_class_view_list:
+      gcc_unreachable ();
     case dw_val_class_loc:
       lv = AT_loc (av);
       if (lv == NULL)
@@ -28768,7 +29234,7 @@ optimize_string_length (dw_attr_node *a)
 	  lv = copy_deref_exprloc (d->expr);
 	  if (lv)
 	    {
-	      *p = new_loc_list (lv, d->begin, d->end, d->section);
+	      *p = new_loc_list (lv, d->begin, d->vbegin, d->end, d->vend, d->section);
 	      p = &(*p)->dw_loc_next;
 	    }
 	  else if (!dwarf_strict && d->expr)
@@ -28838,6 +29304,7 @@ resolve_addr (dw_die_ref die)
 		      {
 			gcc_assert (!next->ll_symbol);
 			next->ll_symbol = (*curr)->ll_symbol;
+			next->vl_symbol = (*curr)->vl_symbol;
 		      }
                     if (dwarf_split_debug_info)
                       remove_loc_list_addr_table_entries (l);
@@ -28863,6 +29330,17 @@ resolve_addr (dw_die_ref die)
 	    ix--;
 	  }
 	break;
+      case dw_val_class_view_list:
+	{
+	  gcc_checking_assert (a->dw_attr == DW_AT_GNU_locviews);
+	  gcc_checking_assert (dwarf2out_locviews_in_attribute ());
+	  if (!view_list_to_loc_list_val_node (&a->dw_attr_val))
+	    {
+	      remove_AT (die, a->dw_attr);
+	      ix--;
+	    }
+	  break;
+	}
       case dw_val_class_loc:
 	{
 	  dw_loc_descr_ref l = AT_loc (a);
@@ -29259,6 +29737,8 @@ hash_loc_list (dw_loc_list_ref list_head)
     {
       hstate.add (curr->begin, strlen (curr->begin) + 1);
       hstate.add (curr->end, strlen (curr->end) + 1);
+      hstate.add_object (curr->vbegin);
+      hstate.add_object (curr->vend);
       if (curr->section)
 	hstate.add (curr->section, strlen (curr->section) + 1);
       hash_locs (curr->expr, hstate);
@@ -29480,6 +29960,7 @@ loc_list_hasher::equal (const dw_loc_list_struct *a,
 	|| strcmp (a->end, b->end) != 0
 	|| (a->section == NULL) != (b->section == NULL)
 	|| (a->section && strcmp (a->section, b->section) != 0)
+	|| a->vbegin != b->vbegin || a->vend != b->vend
 	|| !compare_locs (a->expr, b->expr))
       break;
   return a == NULL && b == NULL;
@@ -29537,7 +30018,7 @@ index_location_lists (dw_die_ref die)
             /* Don't index an entry that has already been indexed
                or won't be output.  */
             if (curr->begin_entry != NULL
-                || (strcmp (curr->begin, curr->end) == 0 && !curr->force))
+                || skip_loc_list_entry (curr))
               continue;
 
             curr->begin_entry
@@ -29972,7 +30453,7 @@ dwarf2out_finish (const char *)
      used by the debug_info section are marked as 'used'.  */
   switch_to_section (debug_line_section);
   ASM_OUTPUT_LABEL (asm_out_file, debug_line_section_label);
-  if (! DWARF2_ASM_LINE_DEBUG_INFO)
+  if (! output_asm_line_debug_info ())
     output_line_info (false);
 
   if (dwarf_split_debug_info && info_section_emitted)

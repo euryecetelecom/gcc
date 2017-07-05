@@ -344,10 +344,12 @@ Objective-C and Objective-C++ Dialects}.
 -ggdb  -grecord-gcc-switches  -gno-record-gcc-switches @gol
 -gstabs  -gstabs+  -gstrict-dwarf  -gno-strict-dwarf @gol
 -gcolumn-info  -gno-column-info @gol
--gvms  -gxcoff  -gxcoff+  -gz@r{[}=@var{type}@r{]} @gol
--fdebug-prefix-map=@var{old}=@var{new}  -fdebug-types-section @gol
--feliminate-dwarf2-dups  -fno-eliminate-unused-debug-types @gol
--femit-struct-debug-baseonly  -femit-struct-debug-reduced @gol
+-gstatement-frontiers  -gno-statement-frontiers @gol
+-gvariable-location-views  -gno-variable-location-views @gol
+-gvms  -gxcoff  -gxcoff+ -gz@r{[}=@var{type}@r{]} @gol
+-fdebug-prefix-map=@var{old}=@var{new} -fdebug-types-section @gol
+-feliminate-dwarf2-dups -fno-eliminate-unused-debug-types @gol
+-femit-struct-debug-baseonly -femit-struct-debug-reduced @gol
 -femit-struct-debug-detailed@r{[}=@var{spec-list}@r{]} @gol
 -feliminate-unused-debug-symbols  -femit-class-debug-always @gol
 -fno-merge-debug-strings  -fno-dwarf2-cfi-asm @gol
@@ -6987,6 +6989,35 @@ Emit location column information into DWARF debugging information, rather
 than just file and line.
 This option is disabled by default.
 
+@item -gstatement-frontiers
+@item -gno-statement-frontiers
+@opindex gstatement-frontiers
+@opindex gno-statement-frontiers
+This option causes GCC to create markers in the internal representation
+at the beginning of statements, and to keep them roughly in place
+throughout compilation, using them to guide the output of @code{is_stmt}
+markers in the line number table.  This is enabled by default when
+compiling with optimization (@option{-Os}, @option{-O}, @option{-O2},
+@dots{}), and outputting DWARF 2 debug information at the normal level.
+
+@item -gvariable-location-views
+@item -gno-variable-location-views
+@opindex gvariable-location-views
+@opindex gno-variable-location-views
+Augment variable location lists with progressive view numbers implied
+from the line number table.  This enables debug information consumers to
+inspect state at certain points of the program, even if no instructions
+associated with the corresponding source locations are present at that
+point.  If the assembler lacks support for view numbers in line number
+tables, this will cause the compiler to emit the line number table,
+which generally makes them somewhat less compact.  The augmented line
+number tables and location lists are fully backward-compatible, so they
+can be consumed by debug information consumers that are not aware of
+these augmentations, but they won't derive any benefit from them either.
+This is enabled by default when outputting DWARF 2 debug information at
+the normal level, as long as @code{-fvar-tracking-assignments} is
+enabled and @code{-gstrict-dwarf} is not.
+
 @item -gz@r{[}=@var{type}@r{]}
 @opindex gz
 Produce compressed debug sections in DWARF format, if that is supported.
@@ -10405,6 +10436,13 @@ low, value expressions that are available and could be represented in
 debug information may end up not being used; setting this higher may
 enable the compiler to find more complex debug expressions, but compile
 time and memory use may grow.  The default is 12.
+
+@item max-debug-marker-count
+Sets a threshold on the number of debug markers (e.g. begin stmt
+markers) to avoid complexity explosion at inlining or expanding to RTL.
+If a function has more such gimple stmts than the set limit, such stmts
+will be dropped from the inlined copy of a function, and from its RTL
+expansion.  The default is 100000.
 
 @item min-nondebug-insn-uid
 Use uids starting at this parameter for nondebug insns.  The range below

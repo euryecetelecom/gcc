@@ -258,6 +258,16 @@ rtx_writer::print_rtx_operand_code_0 (const_rtx in_rtx ATTRIBUTE_UNUSED,
 	  fputc ('\t', m_outfile);
 	  break;
 
+	case NOTE_INSN_BEGIN_STMT:
+#ifndef GENERATOR_FILE
+	  {
+	    expanded_location xloc
+	      = expand_location (NOTE_BEGIN_STMT_LOCATION (in_rtx));
+	    fprintf (m_outfile, " %s:%i", xloc.file, xloc.line);
+	  }
+#endif
+	  break;
+
 	default:
 	  break;
 	}
@@ -806,7 +816,9 @@ rtx_writer::print_rtx (const_rtx in_rtx)
 #ifndef GENERATOR_FILE
       if (GET_CODE (in_rtx) == VAR_LOCATION)
 	{
-	  if (TREE_CODE (PAT_VAR_LOCATION_DECL (in_rtx)) == STRING_CST)
+	  if (!PAT_VAR_LOCATION_DECL (in_rtx))
+	    fputs (" <begin stmt marker>", m_outfile);
+	  else if (TREE_CODE (PAT_VAR_LOCATION_DECL (in_rtx)) == STRING_CST)
 	    fputs (" <debug string placeholder>", m_outfile);
 	  else
 	    print_mem_expr (m_outfile, PAT_VAR_LOCATION_DECL (in_rtx));
@@ -1791,6 +1803,12 @@ print_insn (pretty_printer *pp, const rtx_insn *x, int verbose)
 
     case DEBUG_INSN:
       {
+	if (!INSN_VAR_LOCATION_DECL (x))
+	  {
+	    pp_string (pp, "debug begin stmt marker");
+	    break;
+	  }
+
 	const char *name = "?";
 
 	if (DECL_P (INSN_VAR_LOCATION_DECL (x)))

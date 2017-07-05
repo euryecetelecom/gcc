@@ -1520,6 +1520,18 @@ process_options (void)
     warning_at (UNKNOWN_LOCATION, 0,
 		"var-tracking-assignments changes selective scheduling");
 
+  if (debug_statement_frontiers == AUTODETECT_VALUE)
+    debug_statement_frontiers = optimize && debug_info_level >= DINFO_LEVEL_NORMAL
+      && (write_symbols == DWARF2_DEBUG || write_symbols == VMS_AND_DWARF2_DEBUG);
+
+  if (debug_variable_location_views == AUTODETECT_VALUE)
+    {
+      debug_variable_location_views = flag_var_tracking
+	&& debug_info_level >= DINFO_LEVEL_NORMAL
+	&& (write_symbols == DWARF2_DEBUG || write_symbols == VMS_AND_DWARF2_DEBUG)
+	&& !dwarf_strict;
+    }
+
   if (flag_tree_cselim == AUTODETECT_VALUE)
     {
       if (HAVE_conditional_move)

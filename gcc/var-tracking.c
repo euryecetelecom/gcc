@@ -9471,6 +9471,24 @@ emit_notes_in_bb (basic_block bb, dataflow_set *set)
     }
 }
 
+/* Return BB's head, unless BB is the block that succeeds ENTRY_BLOCK,
+   in which case it searches back from BB's head for the very first
+   insn.  Use [get_first_insn (bb), BB_HEAD (bb->next_bb)[ as a range
+   to iterate over all insns of a function while iterating over its
+   BBs.  */
+
+static rtx_insn *
+get_first_insn (basic_block bb)
+{
+  rtx_insn *insn = BB_HEAD (bb);
+
+  if (bb->prev_bb == ENTRY_BLOCK_PTR_FOR_FN (cfun))
+    while (rtx_insn *prev = PREV_INSN (insn))
+      insn = prev;
+
+  return insn;
+}
+
 /* Emit notes for the whole function.  */
 
 static void
@@ -9501,7 +9519,8 @@ vt_emit_notes (void)
     {
       /* Emit the notes for changes of variable locations between two
 	 subsequent basic blocks.  */
-      emit_notes_for_differences (BB_HEAD (bb), &cur, &VTI (bb)->in);
+      emit_notes_for_differences (get_first_insn (bb),
+				  &cur, &VTI (bb)->in);
 
       if (MAY_HAVE_DEBUG_INSNS)
 	local_get_addr_cache = new hash_map<rtx, rtx>;
@@ -9901,6 +9920,51 @@ vt_init_cfa_base (void)
   cselib_preserve_cfa_base_value (val, REGNO (cfa_base_rtx));
 }
 
+/* Evaluate to TRUE if INSN is a debug insn that denotes a variable
+   location/value tracking annotation.  */
+#define VTA_DEBUG_INSN_P(INSN)			\
+  (DEBUG_INSN_P (INSN)				\
+   && INSN_VAR_LOCATION_DECL (insn))
+/* Evaluate to TRUE if INSN is a debug insn that denotes a program
+   source location marker.  */
+#define MARKER_DEBUG_INSN_P(INSN)		\
+  (DEBUG_INSN_P (INSN)				\
+   && !INSN_VAR_LOCATION_DECL (insn))
+/* Evaluate to the marker kind.  Currently the only kind is
+   BEGIN_STMT.  */
+#define INSN_DEBUG_MARKER_KIND(insn) 0
+
+/* Reemit INSN, a MARKER_DEBUG_INSN, as a note.  */
+
+static rtx_insn *
+reemit_marker_as_note (rtx_insn *insn)
+{
+  gcc_checking_assert (MARKER_DEBUG_INSN_P (insn));
+  /* FIXME: we could use loc and status for other kinds of markers, or
+     for additional information in them.  */
+  gcc_checking_assert (VAR_LOC_UNKNOWN_P (INSN_VAR_LOCATION_LOC (insn)));
+  gcc_checking_assert (INSN_VAR_LOCATION_STATUS (insn)
+		       == VAR_INIT_STATUS_INITIALIZED);
+
+  switch (INSN_DEBUG_MARKER_KIND (insn))
+    {
+    case 0:
+      {
+	rtx_insn *note = NULL;
+	if (cfun->begin_stmt_markers)
+	  {
+	    note = emit_note_before (NOTE_INSN_BEGIN_STMT, insn);
+	    NOTE_BEGIN_STMT_LOCATION (note) = INSN_LOCATION (insn);
+	  }
+	delete_insn (insn);
+	return note;
+      }
+
+    default:
+      gcc_unreachable ();
+    }
+}
+
 /* Allocate and initialize the data structures for variable tracking
    and parse the RTL to get the micro operations.  */
 
@@ -10097,11 +10161,34 @@ vt_initialize (void)
 	{
 	  HOST_WIDE_INT offset = VTI (bb)->out.stack_adjust;
 	  VTI (bb)->out.stack_adjust = VTI (bb)->in.stack_adjust;
-	  for (insn = BB_HEAD (bb); insn != NEXT_INSN (BB_END (bb));
-	       insn = NEXT_INSN (insn))
+
+	  /* If we are walking the first basic block, walk any HEADER
+	     insns that might be before it too.  Unfortunately,
+	     BB_HEADER and BB_FOOTER are not set while we run this
+	     pass.  */
+	  insn = get_first_insn (bb);
+	  for (rtx_insn *next;
+	       insn != BB_HEAD (bb->next_bb)
+		 ? next = NEXT_INSN (insn), true : false;
+	       insn = next)
 	    {
 	      if (INSN_P (insn))
 		{
+		  basic_block save_bb = BLOCK_FOR_INSN (insn);
+		  if (!BLOCK_FOR_INSN (insn))
+		    {
+		      BLOCK_FOR_INSN (insn) = bb;
+		      gcc_assert (DEBUG_INSN_P (insn));
+		      /* Reset debug insns between basic blocks.
+			 Their location is not reliable, because they
+			 were probably not maintained up to date.  */
+		      if (VTA_DEBUG_INSN_P (insn))
+			INSN_VAR_LOCATION_LOC (insn)
+			  = gen_rtx_UNKNOWN_VAR_LOC ();
+		    }
+		  else
+		    gcc_assert (BLOCK_FOR_INSN (insn) == bb);
+
 		  if (!frame_pointer_needed)
 		    {
 		      insn_stack_adjust_offset_pre_post (insn, &pre, &post);
@@ -10123,6 +10210,14 @@ vt_initialize (void)
 		  adjust_insn (bb, insn);
 		  if (MAY_HAVE_DEBUG_INSNS)
 		    {
+		      if (MARKER_DEBUG_INSN_P (insn))
+			{
+			  insn = reemit_marker_as_note (insn);
+			  if (insn)
+			    BLOCK_FOR_INSN (insn) = save_bb;
+			  continue;
+			}
+
 		      if (CALL_P (insn))
 			prepare_call_arguments (bb, insn);
 		      cselib_process_insn (insn);
@@ -10169,6 +10264,7 @@ vt_initialize (void)
 			    }
 			}
 		    }
+		  BLOCK_FOR_INSN (insn) = save_bb;
 		}
 	    }
 	  gcc_assert (offset == VTI (bb)->out.stack_adjust);
@@ -10196,10 +10292,11 @@ vt_initialize (void)
 
 static int debug_label_num = 1;
 
-/* Get rid of all debug insns from the insn stream.  */
+/* Remove from the insn stream all debug insns used for variable
+   tracking at assignments.  */
 
 static void
-delete_debug_insns (void)
+delete_vta_debug_insns (void)
 {
   basic_block bb;
   rtx_insn *insn, *next;
@@ -10209,9 +10306,18 @@ delete_debug_insns (void)
 
   FOR_EACH_BB_FN (bb, cfun)
     {
-      FOR_BB_INSNS_SAFE (bb, insn, next)
+      for (insn = get_first_insn (bb);
+	   insn != BB_HEAD (bb->next_bb)
+	     ? next = NEXT_INSN (insn), true : false;
+	   insn = next)
 	if (DEBUG_INSN_P (insn))
 	  {
+	    if (MARKER_DEBUG_INSN_P (insn))
+	      {
+		insn = reemit_marker_as_note (insn);
+		continue;
+	      }
+
 	    tree decl = INSN_VAR_LOCATION_DECL (insn);
 	    if (TREE_CODE (decl) == LABEL_DECL
 		&& DECL_NAME (decl)
@@ -10237,10 +10343,13 @@ delete_debug_insns (void)
    handled as well..  */
 
 static void
-vt_debug_insns_local (bool skipped ATTRIBUTE_UNUSED)
+vt_debug_insns_local (bool skipped)
 {
-  /* ??? Just skip it all for now.  */
-  delete_debug_insns ();
+  /* ??? Just skip it all for now.  If we skipped the global pass,
+     arrange for stmt markers to be dropped as well.  */
+  if (skipped)
+    cfun->begin_stmt_markers = 0;
+  delete_vta_debug_insns ();
 }
 
 /* Free the data structures needed for variable tracking.  */
@@ -10305,14 +10414,20 @@ variable_tracking_main_1 (void)
 {
   bool success;
 
-  if (flag_var_tracking_assignments < 0
+  /* We won't be called as a separate pass if flag_var_tracking is not
+     set, but final may call us to turn debug markers into notes.  */
+  if ((!flag_var_tracking && MAY_HAVE_DEBUG_INSNS)
+      || flag_var_tracking_assignments < 0
       /* Var-tracking right now assumes the IR doesn't contain
 	 any pseudos at this point.  */
       || targetm.no_register_allocation)
     {
-      delete_debug_insns ();
+      delete_vta_debug_insns ();
       return 0;
     }
+
+  if (!flag_var_tracking)
+    return 0;
 
   if (n_basic_blocks_for_fn (cfun) > 500 &&
       n_edges_for_fn (cfun) / n_basic_blocks_for_fn (cfun) >= 20)
@@ -10335,7 +10450,9 @@ variable_tracking_main_1 (void)
     {
       vt_finalize ();
 
-      delete_debug_insns ();
+      cfun->begin_stmt_markers = 0;
+
+      delete_vta_debug_insns ();
 
       /* This is later restored by our caller.  */
       flag_var_tracking_assignments = 0;

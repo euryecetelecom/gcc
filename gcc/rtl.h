@@ -815,7 +815,8 @@ struct GTY(()) rtvec_def {
 #define NONDEBUG_INSN_P(X) (INSN_P (X) && !DEBUG_INSN_P (X))
 
 /* Nonzero if DEBUG_INSN_P may possibly hold.  */
-#define MAY_HAVE_DEBUG_INSNS (flag_var_tracking_assignments)
+#define MAY_HAVE_DEBUG_INSNS					\
+  (flag_var_tracking_assignments || debug_statement_frontiers)
 
 /* Predicate yielding nonzero iff X is a real insn.  */
 #define INSN_P(X) \
@@ -1585,6 +1586,7 @@ extern const char * const reg_note_name[];
 #define NOTE_EH_HANDLER(INSN)	XCINT (INSN, 3, NOTE)
 #define NOTE_BASIC_BLOCK(INSN)	XCBBDEF (INSN, 3, NOTE)
 #define NOTE_VAR_LOCATION(INSN)	XCEXP (INSN, 3, NOTE)
+#define NOTE_BEGIN_STMT_LOCATION(INSN) XCINT (INSN, 3, NOTE)
 #define NOTE_CFI(INSN)		XCCFI (INSN, 3, NOTE)
 #define NOTE_LABEL_NUMBER(INSN)	XCINT (INSN, 3, NOTE)
 
@@ -2900,13 +2902,13 @@ extern rtx_call_insn *last_call_insn (void);
 extern rtx_insn *previous_insn (rtx_insn *);
 extern rtx_insn *next_insn (rtx_insn *);
 extern rtx_insn *prev_nonnote_insn (rtx_insn *);
-extern rtx_insn *prev_nonnote_insn_bb (rtx_insn *);
 extern rtx_insn *next_nonnote_insn (rtx_insn *);
-extern rtx_insn *next_nonnote_insn_bb (rtx_insn *);
 extern rtx_insn *prev_nondebug_insn (rtx_insn *);
 extern rtx_insn *next_nondebug_insn (rtx_insn *);
 extern rtx_insn *prev_nonnote_nondebug_insn (rtx_insn *);
+extern rtx_insn *prev_nonnote_nondebug_insn_bb (rtx_insn *);
 extern rtx_insn *next_nonnote_nondebug_insn (rtx_insn *);
+extern rtx_insn *next_nonnote_nondebug_insn_bb (rtx_insn *);
 extern rtx_insn *prev_real_insn (rtx_insn *);
 extern rtx_insn *next_real_insn (rtx);
 extern rtx_insn *prev_active_insn (rtx_insn *);

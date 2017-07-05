@@ -3303,6 +3303,10 @@ dump_generic_node (pretty_printer *pp, tree node, int spc, dump_flags_t flags,
       pp_string (pp, "_Cilk_sync");
       break;
 
+    case DEBUG_BEGIN_STMT:
+      pp_string (pp, "# DEBUG BEGIN STMT");
+      break;
+
     default:
       NIY;
     }
@@ -3398,7 +3402,10 @@ print_declaration (pretty_printer *pp, tree t, int spc, dump_flags_t flags)
 	  pp_space (pp);
 	  pp_equal (pp);
 	  pp_space (pp);
-	  dump_generic_node (pp, DECL_INITIAL (t), spc, flags, false);
+	  if (!(flags & TDF_SLIM))
+	    dump_generic_node (pp, DECL_INITIAL (t), spc, flags, false);
+	  else
+	    pp_string (pp, "<<< omitted >>>");
 	}
     }
 

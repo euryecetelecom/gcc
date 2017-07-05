@@ -1130,7 +1130,8 @@ extern void omp_clause_range_check_failed (const_tree, const char *, int,
   ((int)TREE_INT_CST_LOW (VL_EXP_CHECK (NODE)->exp.operands[0]))
 
 /* Nonzero if is_gimple_debug() may possibly hold.  */
-#define MAY_HAVE_DEBUG_STMTS    (flag_var_tracking_assignments)
+#define MAY_HAVE_DEBUG_STMTS					\
+  (flag_var_tracking_assignments || debug_statement_frontiers)
 
 /* In a LOOP_EXPR node.  */
 #define LOOP_EXPR_BODY(NODE) TREE_OPERAND_CHECK_CODE (NODE, LOOP_EXPR, 0)
@@ -1222,7 +1223,7 @@ extern void protected_set_expr_location (tree, location_t);
 
 /* GOTO_EXPR accessor. This gives access to the label associated with
    a goto statement.  */
-#define GOTO_DESTINATION(NODE)  TREE_OPERAND ((NODE), 0)
+#define GOTO_DESTINATION(NODE)  TREE_OPERAND (GOTO_EXPR_CHECK (NODE), 0)
 
 /* ASM_EXPR accessors. ASM_STRING returns a STRING_CST for the
    instruction (e.g., "mov x, y"). ASM_OUTPUTS, ASM_INPUTS, and
