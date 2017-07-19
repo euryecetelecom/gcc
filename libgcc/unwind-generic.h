@@ -288,4 +288,15 @@ EXCEPTION_DISPOSITION _GCC_specific_handler (PEXCEPTION_RECORD, void *,
 #pragma GCC visibility pop
 #endif
 
+#define FRAMES_P_DECL
+#define FRAMES_VAR
+#define FRAMES_VAR_P
+#define FRAMES_VAR_DECL
+#define FRAMES_VAR_DECL_1
+#define FRAMES_VAR_INC
+#define FRAMES_P_UPDATE
+
+/* Additional actions to unwind number of stack frames.  */
+#define _Unwind_Frames_Extra(frames)
+
 #endif /* unwind.h */
