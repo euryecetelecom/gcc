@@ -8482,3 +8482,17 @@ proc check_effective_target_arm_coproc4_ok { } {
     return [check_cached_effective_target arm_coproc4_ok \
 		check_effective_target_arm_coproc4_ok_nocache]
 }
+
+# Return 1 if CET instructions can be compiled.
+
+proc check_effective_target_cet { } {
+    if { !([istarget i?86-*-*] || [istarget x86_64-*-*]) } {
+	return 0
+    }
+    return [check_no_compiler_messages cet object {
+	void foo (void)
+	{
+	  asm ("setssbsy");
+	}
+    } "-O2" ]
+}
