@@ -86,6 +86,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "expr.h"
 #include "gimple-iterator.h"
 #include "tree-ssa-loop-niter.h"
+#include "tree-ssa-loop-ivopts.h"
 #include "tree-ssa-loop.h"
 #include "tree-ssa.h"
 #include "cfgloop.h"
@@ -730,7 +731,19 @@ split_constant_offset (tree exp, tree *var, tree *off)
   *off = ssize_int (0);
   STRIP_NOPS (exp);
 
-  if (tree_is_chrec (exp)
+  if (TREE_CODE (exp) == POLYNOMIAL_CHREC)
+    {
+      split_constant_offset (CHREC_LEFT (exp), &op0, &op1);
+      if (op0 != CHREC_LEFT (exp))
+	{
+	  *var = build3 (POLYNOMIAL_CHREC, type, CHREC_VAR (exp),
+			 op0, CHREC_RIGHT (exp));
+	  *off = op1;
+	}
+      return;
+    }
+
+  if (automatically_generated_chrec_p (exp)
       || get_gimple_rhs_class (TREE_CODE (exp)) == GIMPLE_TERNARY_RHS)
     return;
 
@@ -765,7 +778,28 @@ canonicalize_base_object_address (tree addr)
   return build_fold_addr_expr (TREE_OPERAND (addr, 0));
 }
 
-/* Analyze the behavior of memory reference REF.  There are two modes:
+/* Analyze the scalar evolution of OFFSET in the innermost parent of
+   LOOP for which it isn't invariant.  Return OFFSET itself if the
+   value is invariant or if it's too complex to analyze.  */
+
+static tree
+analyze_offset_scev (struct loop *loop, tree offset)
+{
+  struct loop *inv_loop = outermost_invariant_loop_for_expr (loop, offset);
+  if (inv_loop != NULL)
+    {
+      if (loop_depth (inv_loop) == 0)
+	return offset;
+      loop = loop_outer (inv_loop);
+    }
+  tree res = analyze_scalar_evolution (loop, offset);
+  if (chrec_contains_undetermined (res))
+    return offset;
+  return res;
+}
+
+/* Analyze the behavior of memory reference REF, which occurs in STMT.
+   There are two modes:
 
    - BB analysis.  In this case we simply split the address into base,
      init and offset components, without reference to any containing loop.
@@ -787,14 +821,14 @@ canonicalize_base_object_address (tree addr)
 
 bool
 dr_analyze_innermost (innermost_loop_behavior *drb, tree ref,
-		      struct loop *loop)
+		      gimple *stmt, struct loop *loop)
 {
   HOST_WIDE_INT pbitsize, pbitpos;
   tree base, poffset;
   machine_mode pmode;
   int punsignedp, preversep, pvolatilep;
   affine_iv base_iv, offset_iv;
-  tree init, dinit, step;
+  tree dinit;
   bool in_loop = (loop && loop->num);
 
   if (dump_file && (dump_flags & TDF_DETAILS))
@@ -885,7 +919,7 @@ dr_analyze_innermost (innermost_loop_behavior *drb, tree ref,
         }
     }
 
-  init = ssize_int (pbitpos / BITS_PER_UNIT);
+  tree init = ssize_int (pbitpos / BITS_PER_UNIT);
 
   /* Subtract any constant component from the base and add it to INIT instead.
      Adjust the misalignment to reflect the amount we subtracted.  */
@@ -893,14 +927,14 @@ dr_analyze_innermost (innermost_loop_behavior *drb, tree ref,
   init = size_binop (PLUS_EXPR, init, dinit);
   base_misalignment -= TREE_INT_CST_LOW (dinit);
 
-  split_constant_offset (offset_iv.base, &offset_iv.base, &dinit);
-  init = size_binop (PLUS_EXPR, init, dinit);
-
-  step = size_binop (PLUS_EXPR,
-		     fold_convert (ssizetype, base_iv.step),
-		     fold_convert (ssizetype, offset_iv.step));
-
   base = canonicalize_base_object_address (base_iv.base);
+  tree offset = size_binop (PLUS_EXPR,
+			    fold_convert (ssizetype, offset_iv.base),
+			    init);
+  tree step = size_binop (PLUS_EXPR,
+			  fold_convert (ssizetype, base_iv.step),
+			  fold_convert (ssizetype, offset_iv.step));
+  tree scev = analyze_offset_scev (loop_containing_stmt (stmt), offset);
 
   /* See if get_pointer_alignment can guarantee a higher alignment than
      the one we calculated above.  */
@@ -921,12 +955,12 @@ dr_analyze_innermost (innermost_loop_behavior *drb, tree ref,
     }
 
   drb->base_address = base;
-  drb->offset = fold_convert (ssizetype, offset_iv.base);
-  drb->init = init;
+  drb->offset = offset;
   drb->step = step;
+  split_constant_offset (scev, &drb->var_offset, &drb->const_offset);
   drb->base_alignment = base_alignment;
   drb->base_misalignment = base_misalignment & (base_alignment - 1);
-  drb->offset_alignment = highest_pow2_factor (offset_iv.base);
+  drb->var_offset_alignment = highest_pow2_factor (drb->var_offset);
   drb->step_alignment = highest_pow2_factor (step);
 
   if (dump_file && (dump_flags & TDF_DETAILS))
@@ -1154,7 +1188,7 @@ create_data_ref (loop_p nest, loop_p loop, tree memref, gimple *stmt,
   DR_IS_READ (dr) = is_read;
   DR_IS_CONDITIONAL_IN_STMT (dr) = is_conditional_in_stmt;
 
-  dr_analyze_innermost (&DR_INNERMOST (dr), memref,
+  dr_analyze_innermost (&DR_INNERMOST (dr), memref, stmt,
 			nest != NULL ? loop : NULL);
   dr_analyze_indices (dr, nest, loop);
   dr_analyze_alias (dr);
@@ -1166,15 +1200,17 @@ create_data_ref (loop_p nest, loop_p loop, tree memref, gimple *stmt,
       print_generic_expr (dump_file, DR_BASE_ADDRESS (dr), TDF_SLIM);
       fprintf (dump_file, "\n\toffset from base address: ");
       print_generic_expr (dump_file, DR_OFFSET (dr), TDF_SLIM);
-      fprintf (dump_file, "\n\tconstant offset from base address: ");
-      print_generic_expr (dump_file, DR_INIT (dr), TDF_SLIM);
+      fprintf (dump_file, "\n\tvariable part of offset: ");
+      print_generic_expr (dump_file, DR_VAR_OFFSET (dr), TDF_SLIM);
+      fprintf (dump_file, "\n\tconstant part of offset: ");
+      print_generic_expr (dump_file, DR_CONST_OFFSET (dr), TDF_SLIM);
       fprintf (dump_file, "\n\tstep: ");
       print_generic_expr (dump_file, DR_STEP (dr), TDF_SLIM);
       fprintf (dump_file, "\n\tbase alignment: %d", DR_BASE_ALIGNMENT (dr));
       fprintf (dump_file, "\n\tbase misalignment: %d",
 	       DR_BASE_MISALIGNMENT (dr));
-      fprintf (dump_file, "\n\toffset alignment: %d",
-	       DR_OFFSET_ALIGNMENT (dr));
+      fprintf (dump_file, "\n\tvariable offset alignment: %d",
+	       DR_VAR_OFFSET_ALIGNMENT (dr));
       fprintf (dump_file, "\n\tstep alignment: %d", DR_STEP_ALIGNMENT (dr));
       fprintf (dump_file, "\n\tbase_object: ");
       print_generic_expr (dump_file, DR_BASE_OBJECT (dr), TDF_SLIM);
@@ -1324,11 +1360,12 @@ static bool
 operator == (const dr_with_seg_len& d1,
 	     const dr_with_seg_len& d2)
 {
-  return operand_equal_p (DR_BASE_ADDRESS (d1.dr),
+  return (operand_equal_p (DR_BASE_ADDRESS (d1.dr),
 			  DR_BASE_ADDRESS (d2.dr), 0)
-	   && data_ref_compare_tree (DR_OFFSET (d1.dr), DR_OFFSET (d2.dr)) == 0
-	   && data_ref_compare_tree (DR_INIT (d1.dr), DR_INIT (d2.dr)) == 0
-	   && data_ref_compare_tree (d1.seg_len, d2.seg_len) == 0;
+	  && dr_var_offsets_equal_p (d1.dr, d2.dr)
+	  && data_ref_compare_tree (DR_CONST_OFFSET (d1.dr),
+				    DR_CONST_OFFSET (d2.dr)) == 0
+	  && data_ref_compare_tree (d1.seg_len, d2.seg_len) == 0);
 }
 
 /* Comparison function for sorting objects of dr_with_seg_len_pair_t
@@ -1360,17 +1397,15 @@ comp_dr_with_seg_len_pair (const void *pa_, const void *pb_)
   if ((comp_res = data_ref_compare_tree (DR_STEP (a2.dr),
 					 DR_STEP (b2.dr))) != 0)
     return comp_res;
-  if ((comp_res = data_ref_compare_tree (DR_OFFSET (a1.dr),
-					 DR_OFFSET (b1.dr))) != 0)
+  if ((comp_res = dr_var_offsets_compare (a1.dr, b1.dr)) != 0)
     return comp_res;
-  if ((comp_res = data_ref_compare_tree (DR_INIT (a1.dr),
-					 DR_INIT (b1.dr))) != 0)
+  if ((comp_res = data_ref_compare_tree (DR_CONST_OFFSET (a1.dr),
+					 DR_CONST_OFFSET (b1.dr))) != 0)
     return comp_res;
-  if ((comp_res = data_ref_compare_tree (DR_OFFSET (a2.dr),
-					 DR_OFFSET (b2.dr))) != 0)
+  if ((comp_res = dr_var_offsets_compare (a2.dr, b2.dr)) != 0)
     return comp_res;
-  if ((comp_res = data_ref_compare_tree (DR_INIT (a2.dr),
-					 DR_INIT (b2.dr))) != 0)
+  if ((comp_res = data_ref_compare_tree (DR_CONST_OFFSET (a2.dr),
+					 DR_CONST_OFFSET (b2.dr))) != 0)
     return comp_res;
 
   return 0;
@@ -1455,10 +1490,9 @@ prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
 
 	  if (!operand_equal_p (DR_BASE_ADDRESS (dr_a1->dr),
 				DR_BASE_ADDRESS (dr_a2->dr), 0)
-	      || !operand_equal_p (DR_OFFSET (dr_a1->dr),
-				   DR_OFFSET (dr_a2->dr), 0)
-	      || !tree_fits_shwi_p (DR_INIT (dr_a1->dr))
-	      || !tree_fits_shwi_p (DR_INIT (dr_a2->dr)))
+	      || !dr_var_offsets_equal_p (dr_a1->dr, dr_a2->dr)
+	      || !tree_fits_shwi_p (DR_CONST_OFFSET (dr_a1->dr))
+	      || !tree_fits_shwi_p (DR_CONST_OFFSET (dr_a2->dr)))
 	    continue;
 
 	  /* Only merge const step data references.  */
@@ -1484,11 +1518,13 @@ prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
 	    continue;
 
 	  /* Make sure dr_a1 starts left of dr_a2.  */
-	  if (tree_int_cst_lt (DR_INIT (dr_a2->dr), DR_INIT (dr_a1->dr)))
+	  if (tree_int_cst_lt (DR_CONST_OFFSET (dr_a2->dr),
+			       DR_CONST_OFFSET (dr_a1->dr)))
 	    std::swap (*dr_a1, *dr_a2);
 
 	  bool do_remove = false;
-	  wide_int diff = wi::sub (DR_INIT (dr_a2->dr), DR_INIT (dr_a1->dr));
+	  wide_int diff = wi::sub (DR_CONST_OFFSET (dr_a2->dr),
+				   DR_CONST_OFFSET (dr_a1->dr));
 	  wide_int min_seg_len_b;
 	  tree new_seg_len;
 
@@ -1756,10 +1792,6 @@ create_intersect_range_checks (struct loop *loop, tree *cond_expr,
   tree addr_base_b = DR_BASE_ADDRESS (dr_b.dr);
   tree offset_a = DR_OFFSET (dr_a.dr), offset_b = DR_OFFSET (dr_b.dr);
 
-  offset_a = fold_build2 (PLUS_EXPR, TREE_TYPE (offset_a),
-			  offset_a, DR_INIT (dr_a.dr));
-  offset_b = fold_build2 (PLUS_EXPR, TREE_TYPE (offset_b),
-			  offset_b, DR_INIT (dr_b.dr));
   addr_base_a = fold_build_pointer_plus (addr_base_a, offset_a);
   addr_base_b = fold_build_pointer_plus (addr_base_b, offset_b);
 
@@ -1824,48 +1856,6 @@ create_runtime_alias_checks (struct loop *loop,
       else
 	*cond_expr = part_cond_expr;
     }
-}
-
-/* Check if OFFSET1 and OFFSET2 (DR_OFFSETs of some data-refs) are identical
-   expressions.  */
-static bool
-dr_equal_offsets_p1 (tree offset1, tree offset2)
-{
-  bool res;
-
-  STRIP_NOPS (offset1);
-  STRIP_NOPS (offset2);
-
-  if (offset1 == offset2)
-    return true;
-
-  if (TREE_CODE (offset1) != TREE_CODE (offset2)
-      || (!BINARY_CLASS_P (offset1) && !UNARY_CLASS_P (offset1)))
-    return false;
-
-  res = dr_equal_offsets_p1 (TREE_OPERAND (offset1, 0),
-                             TREE_OPERAND (offset2, 0));
-
-  if (!res || !BINARY_CLASS_P (offset1))
-    return res;
-
-  res = dr_equal_offsets_p1 (TREE_OPERAND (offset1, 1),
-                             TREE_OPERAND (offset2, 1));
-
-  return res;
-}
-
-/* Check if DRA and DRB have equal offsets.  */
-bool
-dr_equal_offsets_p (struct data_reference *dra,
-                    struct data_reference *drb)
-{
-  tree offset1, offset2;
-
-  offset1 = DR_OFFSET (dra);
-  offset2 = DR_OFFSET (drb);
-
-  return dr_equal_offsets_p1 (offset1, offset2);
 }
 
 /* Returns true if FNA == FNB.  */
@@ -5083,13 +5073,13 @@ dr_alignment (innermost_loop_behavior *drb)
   /* Get the alignment of BASE_ADDRESS + INIT.  */
   unsigned int alignment = drb->base_alignment;
   unsigned int misalignment = (drb->base_misalignment
-			       + TREE_INT_CST_LOW (drb->init));
+			       + TREE_INT_CST_LOW (drb->const_offset));
   if (misalignment != 0)
     alignment = MIN (alignment, misalignment & -misalignment);
 
   /* Cap it to the alignment of OFFSET.  */
-  if (!integer_zerop (drb->offset))
-    alignment = MIN (alignment, drb->offset_alignment);
+  if (!integer_zerop (drb->var_offset))
+    alignment = MIN (alignment, drb->var_offset_alignment);
 
   /* Cap it to the alignment of STEP.  */
   if (!integer_zerop (drb->step))

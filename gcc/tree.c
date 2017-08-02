@@ -2602,6 +2602,12 @@ tree_ctz (const_tree expr)
 	  return MIN (ret1, prec);
 	}
       return 0;
+    case POLYNOMIAL_CHREC:
+      ret1 = tree_ctz (CHREC_LEFT (expr));
+      if (ret1 == 0)
+	return ret1;
+      ret2 = tree_ctz (CHREC_RIGHT (expr));
+      return MIN (ret1, ret2);
     default:
       return 0;
     }

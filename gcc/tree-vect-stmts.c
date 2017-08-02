@@ -5992,9 +5992,7 @@ vectorizable_store (gimple *stmt, gimple_stmt_iterator *gsi, gimple **vec_stmt,
       stride_base
 	= fold_build_pointer_plus
 	    (unshare_expr (DR_BASE_ADDRESS (first_dr)),
-	     size_binop (PLUS_EXPR,
-			 convert_to_ptrofftype (unshare_expr (DR_OFFSET (first_dr))),
-			 convert_to_ptrofftype (DR_INIT (first_dr))));
+	     convert_to_ptrofftype (unshare_expr (DR_OFFSET (first_dr))));
       stride_step = fold_convert (sizetype, unshare_expr (DR_STEP (first_dr)));
 
       /* For a store with loop-invariant (but other than power-of-2)
@@ -6321,7 +6319,6 @@ vectorizable_store (gimple *stmt, gimple_stmt_iterator *gsi, gimple **vec_stmt,
 	      && TREE_CODE (DR_BASE_ADDRESS (first_dr)) == ADDR_EXPR
 	      && VAR_P (TREE_OPERAND (DR_BASE_ADDRESS (first_dr), 0))
 	      && integer_zerop (DR_OFFSET (first_dr))
-	      && integer_zerop (DR_INIT (first_dr))
 	      && alias_sets_conflict_p (get_alias_set (aggr_type),
 					get_alias_set (TREE_TYPE (ref_type))))
 	    {
@@ -7018,9 +7015,7 @@ vectorizable_load (gimple *stmt, gimple_stmt_iterator *gsi, gimple **vec_stmt,
       stride_base
 	= fold_build_pointer_plus
 	    (DR_BASE_ADDRESS (first_dr),
-	     size_binop (PLUS_EXPR,
-			 convert_to_ptrofftype (DR_OFFSET (first_dr)),
-			 convert_to_ptrofftype (DR_INIT (first_dr))));
+	     convert_to_ptrofftype (DR_OFFSET (first_dr)));
       stride_step = fold_convert (sizetype, DR_STEP (first_dr));
 
       /* For a load with loop-invariant (but other than power-of-2)
@@ -7419,7 +7414,6 @@ vectorizable_load (gimple *stmt, gimple_stmt_iterator *gsi, gimple **vec_stmt,
 	      && TREE_CODE (DR_BASE_ADDRESS (first_dr)) == ADDR_EXPR
 	      && VAR_P (TREE_OPERAND (DR_BASE_ADDRESS (first_dr), 0))
 	      && integer_zerop (DR_OFFSET (first_dr))
-	      && integer_zerop (DR_INIT (first_dr))
 	      && alias_sets_conflict_p (get_alias_set (aggr_type),
 					get_alias_set (TREE_TYPE (ref_type)))
 	      && (alignment_support_scheme == dr_aligned
@@ -7442,8 +7436,8 @@ vectorizable_load (gimple *stmt, gimple_stmt_iterator *gsi, gimple **vec_stmt,
 		= STMT_VINFO_DATA_REF (vinfo_for_stmt (first_stmt_for_drptr));
 	      tree diff = fold_convert (sizetype,
 					size_binop (MINUS_EXPR,
-						    DR_INIT (first_dr),
-						    DR_INIT (ptrdr)));
+						    DR_CONST_OFFSET (first_dr),
+						    DR_CONST_OFFSET (ptrdr)));
 	      dataref_ptr = bump_vector_ptr (dataref_ptr, ptr_incr, gsi,
 					     stmt, diff);
 	    }

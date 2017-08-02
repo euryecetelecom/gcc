@@ -903,8 +903,7 @@ build_addr_arg_loc (location_t loc, data_reference_p dr, tree nb_bytes)
 {
   tree addr_base;
 
-  addr_base = size_binop_loc (loc, PLUS_EXPR, DR_OFFSET (dr), DR_INIT (dr));
-  addr_base = fold_convert_loc (loc, sizetype, addr_base);
+  addr_base = fold_convert_loc (loc, sizetype, DR_OFFSET (dr));
 
   /* Test for a negative stride, iterating over every element.  */
   if (tree_int_cst_sgn (DR_STEP (dr)) == -1)
@@ -1289,8 +1288,7 @@ build_rdg_partition_for_vertex (struct graph *rdg, int v)
 
 	  /* Partition can only be executed sequentially if there is any
 	     unknown data reference.  */
-	  if (!DR_BASE_ADDRESS (dr) || !DR_OFFSET (dr)
-	      || !DR_INIT (dr) || !DR_STEP (dr))
+	  if (!DR_BASE_ADDRESS (dr) || !DR_OFFSET (dr) || !DR_STEP (dr))
 	    partition->type = PTYPE_SEQUENTIAL;
 
 	  bitmap_set_bit (partition->datarefs, idx);
@@ -1507,21 +1505,18 @@ share_memory_accesses (struct graph *rdg,
     {
       dr1 = datarefs_vec[i];
 
-      if (!DR_BASE_ADDRESS (dr1)
-	  || !DR_OFFSET (dr1) || !DR_INIT (dr1) || !DR_STEP (dr1))
+      if (!DR_BASE_ADDRESS (dr1) || !DR_OFFSET (dr1) || !DR_STEP (dr1))
 	continue;
 
       EXECUTE_IF_SET_IN_BITMAP (partition2->datarefs, 0, j, bj)
 	{
 	  dr2 = datarefs_vec[j];
 
-	  if (!DR_BASE_ADDRESS (dr2)
-	      || !DR_OFFSET (dr2) || !DR_INIT (dr2) || !DR_STEP (dr2))
+	  if (!DR_BASE_ADDRESS (dr2) || !DR_OFFSET (dr2) || !DR_STEP (dr2))
 	    continue;
 
 	  if (operand_equal_p (DR_BASE_ADDRESS (dr1), DR_BASE_ADDRESS (dr2), 0)
 	      && operand_equal_p (DR_OFFSET (dr1), DR_OFFSET (dr2), 0)
-	      && operand_equal_p (DR_INIT (dr1), DR_INIT (dr2), 0)
 	      && operand_equal_p (DR_STEP (dr1), DR_STEP (dr2), 0))
 	    return true;
 	}
@@ -1705,7 +1700,6 @@ pg_add_dependence_edges (struct graph *rdg, int dir,
 		 runtime alias check.  */
 	      if (!DR_BASE_ADDRESS (dr1) || !DR_BASE_ADDRESS (dr2)
 		  || !DR_OFFSET (dr1) || !DR_OFFSET (dr2)
-		  || !DR_INIT (dr1) || !DR_INIT (dr2)
 		  || !DR_STEP (dr1) || !tree_fits_uhwi_p (DR_STEP (dr1))
 		  || !DR_STEP (dr2) || !tree_fits_uhwi_p (DR_STEP (dr2))
 		  || res == 0)
@@ -2203,7 +2197,7 @@ compute_alias_check_pairs (struct loop *loop, vec<ddr_p> *alias_ddrs,
 					    DR_BASE_ADDRESS (dr_b));
 
       if (comp_res == 0)
-	comp_res = data_ref_compare_tree (DR_OFFSET (dr_a), DR_OFFSET (dr_b));
+	comp_res = dr_var_offsets_compare (dr_a, dr_b);
       gcc_assert (comp_res != 0);
 
       if (latch_dominated_by_data_ref (loop, dr_a))
