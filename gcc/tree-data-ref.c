@@ -1453,7 +1453,7 @@ comp_dr_with_seg_len_pair (const void *pa_, const void *pb_)
 
 void
 prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
-			       unsigned HOST_WIDE_INT factor)
+			       poly_uint64 factor)
 {
   /* Sort the collected data ref pairs so that we can scan them once to
      combine all possible aliasing checks.  */
@@ -1505,43 +1505,54 @@ prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
 	      || !tree_fits_shwi_p (DR_CONST_OFFSET (dr_a2->dr)))
 	    continue;
 
+	  HOST_WIDE_INT init_a1 = tree_to_shwi (DR_CONST_OFFSET (dr_a1->dr));
+	  HOST_WIDE_INT init_a2 = tree_to_shwi (DR_CONST_OFFSET (dr_a2->dr));
+
+	  /* Make sure dr_a1 starts left of dr_a2.  */
+	  if (init_a1 > init_a2)
+	    {
+	      std::swap (*dr_a1, *dr_a2);
+	      std::swap (init_a1, init_a2);
+	    }
+
 	  /* Only merge const step data references.  */
-	  if (TREE_CODE (DR_STEP (dr_a1->dr)) != INTEGER_CST
-	      || TREE_CODE (DR_STEP (dr_a2->dr)) != INTEGER_CST)
+	  if (!tree_fits_shwi_p (DR_STEP (dr_a1->dr))
+	      || !tree_fits_shwi_p (DR_STEP (dr_a2->dr)))
 	    continue;
+
+	  HOST_WIDE_INT step_a1 = tree_to_shwi (DR_STEP (dr_a1->dr));
+	  HOST_WIDE_INT step_a2 = tree_to_shwi (DR_STEP (dr_a2->dr));
 
 	  /* DR_A1 and DR_A2 must goes in the same direction.  */
-	  if (tree_int_cst_compare (DR_STEP (dr_a1->dr), size_zero_node)
-	      != tree_int_cst_compare (DR_STEP (dr_a2->dr), size_zero_node))
+	  if ((step_a1 < 0 && step_a2 > 0)
+	      || (step_a1 > 0 && step_a2 < 0))
 	    continue;
 
-	  bool neg_step
-	    = (tree_int_cst_compare (DR_STEP (dr_a1->dr), size_zero_node) < 0);
+	  bool neg_step = (step_a1 < 0 || step_a2 < 0);
+
+	  poly_uint64 seg_len_a1, seg_len_a2;
+	  bool const_seg_len_a1 = poly_tree_p (dr_a1->seg_len, &seg_len_a1);
+	  bool const_seg_len_a2 = poly_tree_p (dr_a2->seg_len, &seg_len_a2);
 
 	  /* We need to compute merged segment length at compilation time for
 	     dr_a1 and dr_a2, which is impossible if either one has non-const
 	     segment length.  */
-	  if ((!tree_fits_uhwi_p (dr_a1->seg_len)
-	       || !tree_fits_uhwi_p (dr_a2->seg_len))
-	      && tree_int_cst_compare (DR_STEP (dr_a1->dr),
-				       DR_STEP (dr_a2->dr)) != 0)
+	  if ((!const_seg_len_a1 || !const_seg_len_a2)
+	      && step_a1 != step_a2)
 	    continue;
 
-	  /* Make sure dr_a1 starts left of dr_a2.  */
-	  if (tree_int_cst_lt (DR_CONST_OFFSET (dr_a2->dr),
-			       DR_CONST_OFFSET (dr_a1->dr)))
-	    std::swap (*dr_a1, *dr_a2);
-
 	  bool do_remove = false;
-	  wide_int diff = wi::sub (DR_CONST_OFFSET (dr_a2->dr),
-				   DR_CONST_OFFSET (dr_a1->dr));
-	  wide_int min_seg_len_b;
+	  poly_uint64 diff = init_a2 - init_a1;
+	  poly_uint64 min_seg_len_b;
 	  tree new_seg_len;
 
-	  if (TREE_CODE (dr_b1->seg_len) == INTEGER_CST)
-	    min_seg_len_b = wi::abs (dr_b1->seg_len);
-	  else
-	    min_seg_len_b = wi::mul (factor, wi::abs (DR_STEP (dr_b1->dr)));
+	  if (!poly_tree_p (dr_b1->seg_len, &min_seg_len_b))
+	    {
+	      tree step_b = DR_STEP (dr_b1->dr);
+	      if (!tree_fits_shwi_p (step_b))
+		continue;
+	      min_seg_len_b = factor * abs_hwi (tree_to_shwi (step_b));
+	    }
 
 	  /* Now we try to merge alias check dr_a1 & dr_b and dr_a2 & dr_b.
 
@@ -1578,25 +1589,24 @@ prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
 	  if (neg_step)
 	    {
 	      /* Adjust diff according to access size of both references.  */
-	      tree size_a1 = TYPE_SIZE_UNIT (TREE_TYPE (DR_REF (dr_a1->dr)));
-	      tree size_a2 = TYPE_SIZE_UNIT (TREE_TYPE (DR_REF (dr_a2->dr)));
-	      diff = wi::add (diff, wi::sub (size_a2, size_a1));
+	      diff += tree_to_poly_uint64
+		(TYPE_SIZE_UNIT (TREE_TYPE (DR_REF (dr_a2->dr))));
+	      diff -= tree_to_poly_uint64
+		(TYPE_SIZE_UNIT (TREE_TYPE (DR_REF (dr_a1->dr))));
 	      /* Case A.1.  */
-	      if (wi::leu_p (diff, min_seg_len_b)
+	      if (must_le (diff, min_seg_len_b)
 		  /* Case A.2 and B combined.  */
-		  || (tree_fits_uhwi_p (dr_a2->seg_len)))
+		  || const_seg_len_a2)
 		{
-		  if (tree_fits_uhwi_p (dr_a1->seg_len)
-		      && tree_fits_uhwi_p (dr_a2->seg_len))
+		  if (const_seg_len_a1 || const_seg_len_a2)
 		    new_seg_len
-		      = wide_int_to_tree (sizetype,
-					  wi::umin (wi::sub (dr_a1->seg_len,
-							     diff),
-						    dr_a2->seg_len));
+		      = build_int_cstu (sizetype,
+					lower_bound (seg_len_a1 - diff,
+						     seg_len_a2));
 		  else
 		    new_seg_len
 		      = size_binop (MINUS_EXPR, dr_a2->seg_len,
-				    wide_int_to_tree (sizetype, diff));
+				    build_int_cstu (sizetype, diff));
 
 		  dr_a2->seg_len = new_seg_len;
 		  do_remove = true;
@@ -1605,21 +1615,19 @@ prune_runtime_alias_test_list (vec<dr_with_seg_len_pair_t> *alias_pairs,
 	  else
 	    {
 	      /* Case A.1.  */
-	      if (wi::leu_p (diff, min_seg_len_b)
+	      if (must_le (diff, min_seg_len_b)
 		  /* Case A.2 and B combined.  */
-		  || (tree_fits_uhwi_p (dr_a1->seg_len)))
+		  || const_seg_len_a1)
 		{
-		  if (tree_fits_uhwi_p (dr_a1->seg_len)
-		      && tree_fits_uhwi_p (dr_a2->seg_len))
+		  if (const_seg_len_a1 && const_seg_len_a2)
 		    new_seg_len
-		      = wide_int_to_tree (sizetype,
-					  wi::umax (wi::add (dr_a2->seg_len,
-							     diff),
-						    dr_a1->seg_len));
+		      = build_int_cstu (sizetype,
+					upper_bound (seg_len_a2 + diff,
+						     seg_len_a1));
 		  else
 		    new_seg_len
 		      = size_binop (PLUS_EXPR, dr_a2->seg_len,
-				    wide_int_to_tree (sizetype, diff));
+				    build_int_cstu (sizetype, diff));
 
 		  dr_a1->seg_len = new_seg_len;
 		  do_remove = true;
