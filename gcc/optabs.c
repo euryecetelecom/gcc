@@ -7066,7 +7066,9 @@ maybe_legitimize_operand (enum insn_code icode, unsigned int opno,
 
     case EXPAND_INTEGER:
       mode = insn_data[(int) icode].operand[opno].mode;
-      if (mode != VOIDmode && const_int_operand (op->value, mode))
+      if (mode != VOIDmode
+	  && must_eq (trunc_int_for_mode (op->int_value, mode),
+		      op->int_value))
 	goto input;
       break;
     }
