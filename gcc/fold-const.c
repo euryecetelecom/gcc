@@ -7121,6 +7121,8 @@ fold_plusminus_mult_expr (location_t loc, enum tree_code code, tree type,
 				     fold_convert_loc (loc, type, alt1)),
 			fold_convert_loc (loc, type, same));
 
+  return NULL_TREE;
+
   /* Same may be zero and thus the operation 'code' may overflow.  Likewise
      same may be minus one and thus the multiplication may overflow.  Perform
      the operations in an unsigned type.  */
