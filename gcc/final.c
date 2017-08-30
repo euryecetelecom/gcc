@@ -81,6 +81,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "asan.h"
 #include "rtl-iter.h"
 #include "print-rtl.h"
+#include "langhooks.h"
 
 #ifdef XCOFF_DEBUGGING_INFO
 #include "xcoffout.h"		/* Needed for external data declarations.  */
@@ -112,6 +113,7 @@ along with GCC; see the file COPYING3.  If not see
 /* Bitflags used by final_scan_insn.  */
 #define SEEN_NOTE	1
 #define SEEN_EMITTED	2
+#define SEEN_NEXT_VIEW	4
 
 /* Last insn processed by final_scan_insn.  */
 static rtx_insn *debug_insn;
@@ -1759,6 +1761,44 @@ get_some_local_dynamic_name ()
   return 0;
 }
 
+/* Arrange for us to emit a source location note before any further
+   real insns or section changes, by setting the SEEN_NEXT_VIEW bit in
+   *SEEN, as long as we are keeping track of location views.  The bit
+   indicates we have referenced the next view at the current PC, so we
+   have to emit it.  This should be called next to the var_location
+   debug hook.  */
+
+static inline void
+set_next_view_needed (int *seen)
+{
+  if (debug_variable_location_views)
+    *seen |= SEEN_NEXT_VIEW;
+}
+
+/* Clear the flag in *SEEN indicating we need to emit the next view.
+   This should be called next to the source_line debug hook.  */
+
+static inline void
+clear_next_view_needed (int *seen)
+{
+  *seen &= ~SEEN_NEXT_VIEW;
+}
+
+/* Test whether we have a pending request to emit the next view in
+   *SEEN, and emit it if needed, clearing the request bit.  */
+
+static inline void
+maybe_output_next_view (int *seen)
+{
+  if ((*seen & SEEN_NEXT_VIEW) != 0)
+    {
+      clear_next_view_needed (seen);
+      (*debug_hooks->source_line) (last_linenum, last_columnnum,
+				   last_filename, last_discriminator,
+				   false);
+    }
+}
+
 /* Output assembler code for the start of a function,
    and initialize some of the variables in this file
    for the new function.  The label for the function and associated
@@ -1766,12 +1806,15 @@ get_some_local_dynamic_name ()
 
    FIRST is the first insn of the rtl for the function being compiled.
    FILE is the file to write assembler code to.
+   SEEN should be initially set to zero, and it may be updated to
+   indicate we have references to the next location view, that would
+   require us to emit it at the current PC.
    OPTIMIZE_P is nonzero if we should eliminate redundant
      test and compare insns.  */
 
-void
-final_start_function (rtx_insn **firstp, FILE *file,
-		      int optimize_p ATTRIBUTE_UNUSED)
+static void
+final_start_function_1 (rtx_insn **firstp, FILE *file, int *seen,
+			int optimize_p ATTRIBUTE_UNUSED)
 {
   rtx_insn *first = *firstp;
 
@@ -1792,7 +1835,28 @@ final_start_function (rtx_insn **firstp, FILE *file,
     asan_function_start ();
 
   if (!DECL_IGNORED_P (current_function_decl))
-    debug_hooks->begin_prologue (last_linenum, last_columnnum, last_filename);
+    {
+      /* Emit param bindings (before the first begin_stmt) in the
+	 initial view.  We don't test whether the DECLs are
+	 PARM_DECLs: the assumption is that there will be a
+	 NOTE_INSN_BEGIN_STMT marker before any non-parameter
+	 NOTE_INSN_VAR_LOCATION.  It's ok if the marker is not there,
+	 we'll just have more variable locations bound in the initial
+	 view, which is consistent with their being bound without any
+	 code that would give them a value.  */
+      if (debug_variable_location_views)
+	{
+	  rtx_insn *insn;
+	  for (insn = first;
+	       insn && GET_CODE (insn) == NOTE
+		 && NOTE_KIND (insn) == NOTE_INSN_VAR_LOCATION;
+	       insn = NEXT_INSN (insn))
+	    final_scan_insn (insn, file, 0, 0, seen);
+	  *firstp = insn;
+	}
+      debug_hooks->begin_prologue (last_linenum, last_columnnum,
+				   last_filename);
+    }
 
   if (!dwarf2_debug_info_emitted_p (current_function_decl))
     dwarf2out_begin_prologue (0, 0, NULL);
@@ -1865,6 +1929,17 @@ final_start_function (rtx_insn **firstp, FILE *file,
      be emitted when NOTE_INSN_PROLOGUE_END is scanned.  */
   if (! targetm.have_prologue ())
     profile_after_prologue (file);
+}
+
+/* This is an exported final_start_function_1, callable without SEEN.  */
+
+void
+final_start_function (rtx_insn **firstp, FILE *file,
+		      int optimize_p ATTRIBUTE_UNUSED)
+{
+  int seen = 0;
+  final_start_function_1 (firstp, file, &seen, optimize_p);
+  gcc_assert (seen == 0);
 }
 
 static void
@@ -1998,11 +2073,10 @@ dump_basic_block_info (FILE *file, rtx_insn *insn, basic_block *start_to_bb,
 /* Output assembler code for some insns: all or part of a function.
    For description of args, see `final_start_function', above.  */
 
-void
-final (rtx_insn *first, FILE *file, int optimize_p)
+static void
+final_1 (rtx_insn *first, FILE *file, int seen, int optimize_p)
 {
   rtx_insn *insn, *next;
-  int seen = 0;
 
   /* Used for -dA dump.  */
   basic_block *start_to_bb = NULL;
@@ -2069,6 +2143,8 @@ final (rtx_insn *first, FILE *file, int optimize_p)
       insn = final_scan_insn (insn, file, optimize_p, 0, &seen);
     }
 
+  maybe_output_next_view (&seen);
+
   if (flag_debug_asm)
     {
       free (start_to_bb);
@@ -2084,6 +2160,14 @@ final (rtx_insn *first, FILE *file, int optimize_p)
 	      || NOTE_KIND (insn) == NOTE_INSN_CFI_LABEL))
 	delete_insn (insn);
     }
+}
+
+/* This is an exported final_1, callable without SEEN.  */
+
+void
+final (rtx_insn *first, FILE *file, int optimize_p)
+{
+  final_1 (first, file, 0, optimize_p);
 }
 
 const char *
@@ -2224,6 +2308,8 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	  break;
 
 	case NOTE_INSN_SWITCH_TEXT_SECTIONS:
+	  maybe_output_next_view (seen);
+
 	  in_cold_section_p = !in_cold_section_p;
 
 	  if (dwarf2out_do_frame ())
@@ -2364,6 +2450,8 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	  break;
 
 	case NOTE_INSN_BLOCK_END:
+	  maybe_output_next_view (seen);
+
 	  if (debug_info_level == DINFO_LEVEL_NORMAL
 	      || debug_info_level == DINFO_LEVEL_VERBOSE
 	      || write_symbols == DWARF2_DEBUG
@@ -2421,7 +2509,10 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	case NOTE_INSN_VAR_LOCATION:
 	case NOTE_INSN_CALL_ARG_LOCATION:
 	  if (!DECL_IGNORED_P (current_function_decl))
-	    debug_hooks->var_location (insn);
+	    {
+	      debug_hooks->var_location (insn);
+	      set_next_view_needed (seen);
+	    }
 	  break;
 
 	case NOTE_INSN_BEGIN_STMT:
@@ -2432,6 +2523,7 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	      (*debug_hooks->source_line) (last_linenum, last_columnnum,
 					   last_filename, last_discriminator,
 					   true);
+	      clear_next_view_needed (seen);
 	    }
 	  break;
 
@@ -2628,6 +2720,10 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 
 	    switch_to_section (current_function_section ());
 
+	    if (debug_variable_location_views
+		&& !DECL_IGNORED_P (current_function_decl))
+	      debug_hooks->var_location (insn);
+
 	    break;
 	  }
 	/* Output this line note if it is the first or the last line
@@ -2640,7 +2736,12 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	    (*debug_hooks->source_line) (last_linenum, last_columnnum,
 					 last_filename, last_discriminator,
 					 is_stmt);
+	    clear_next_view_needed (seen);
 	  }
+	else
+	  maybe_output_next_view (seen);
+
+	gcc_checking_assert (!DEBUG_INSN_P (insn));
 
 	if (GET_CODE (body) == PARALLEL
 	    && GET_CODE (XVECEXP (body, 0, 0)) == ASM_INPUT)
@@ -3107,7 +3208,8 @@ final_scan_insn (rtx_insn *insn, FILE *file, int optimize_p ATTRIBUTE_UNUSED,
 	/* Let the debug info back-end know about this call.  We do this only
 	   after the instruction has been emitted because labels that may be
 	   created to reference the call instruction must appear after it.  */
-	if (call_insn != NULL && !DECL_IGNORED_P (current_function_decl))
+	if ((debug_variable_location_views || call_insn != NULL)
+	    && !DECL_IGNORED_P (current_function_decl))
 	  debug_hooks->var_location (insn);
 
 	current_output_insn = debug_insn = 0;
@@ -4547,8 +4649,9 @@ rest_of_handle_final (void)
 
   assemble_start_function (current_function_decl, fnname);
   rtx_insn *first = get_insns ();
-  final_start_function (&first, asm_out_file, optimize);
-  final (first, asm_out_file, optimize);
+  int seen = 0;
+  final_start_function_1 (&first, asm_out_file, &seen, optimize);
+  final_1 (first, asm_out_file, seen, optimize);
   if (flag_ipa_ra
       && !lookup_attribute ("noipa", DECL_ATTRIBUTES (current_function_decl)))
     collect_fn_hard_reg_usage ();
