@@ -284,6 +284,12 @@ struct GTY(()) function {
   /* Last statement uid.  */
   int last_stmt_uid;
 
+  /* Debug marker counter.  Count begin stmt markers.  We don't have
+     to keep it exact, it's more of a rough estimate to enable us to
+     decide whether they are too many to copy during inlining, or when
+     expanding to RTL.  */
+  int debug_marker_count;
+
   /* Function sequence number for profiling, debugging, etc.  */
   int funcdef_no;
 
@@ -387,6 +393,10 @@ struct GTY(()) function {
 
   /* Set when the tail call has been identified.  */
   unsigned int tail_call_marked : 1;
+
+  /* Set when the function was compiled with generation of debug
+     (begin stmt, inline entry, ...) markers enabled.  */
+  unsigned int debug_nonbind_markers : 1;
 };
 
 /* Add the decl D to the local_decls list of FUN.  */
