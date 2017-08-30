@@ -1331,7 +1331,7 @@ gsi_insert_earliest (gimple_seq seq)
   FOR_EACH_VEC_ELT (stmts, i, use_stmt)
     {
       gcc_assert (gimple_code (use_stmt) != GIMPLE_PHI);
-      gimple_stmt_iterator gsi_def_stmt = gsi_start_bb_nondebug (begin_bb);
+      gimple_stmt_iterator gsi_def_stmt = gsi_start_nondebug_bb (begin_bb);
 
       use_operand_p use_p;
       ssa_op_iter op_iter;
@@ -1363,7 +1363,7 @@ gsi_insert_earliest (gimple_seq seq)
       else if (gimple_code (gsi_stmt (gsi_def_stmt)) == GIMPLE_PHI)
 	{
 	  gimple_stmt_iterator bsi
-	    = gsi_start_bb_nondebug (gsi_bb (gsi_def_stmt));
+	    = gsi_start_nondebug_bb (gsi_bb (gsi_def_stmt));
 	  /* Insert right after the PHI statements.  */
 	  gsi_insert_before (&bsi, use_stmt, GSI_NEW_STMT);
 	}
@@ -1646,7 +1646,8 @@ rename_uses (gimple *copy, gimple_stmt_iterator *gsi_tgt, basic_block old_bb,
     {
       if (gimple_debug_bind_p (copy))
 	gimple_debug_bind_reset_value (copy);
-      else if (gimple_debug_source_bind_p (copy))
+      else if (gimple_debug_source_bind_p (copy)
+	       || gimple_debug_nonbind_marker_p (copy))
 	return false;
       else
 	gcc_unreachable ();
