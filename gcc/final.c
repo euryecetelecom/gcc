@@ -1770,9 +1770,11 @@ get_some_local_dynamic_name ()
      test and compare insns.  */
 
 void
-final_start_function (rtx_insn *first, FILE *file,
+final_start_function (rtx_insn **firstp, FILE *file,
 		      int optimize_p ATTRIBUTE_UNUSED)
 {
+  rtx_insn *first = *firstp;
+
   block_depth = 0;
 
   this_is_asm_operands = 0;
@@ -4544,8 +4546,9 @@ rest_of_handle_final (void)
     variable_tracking_main ();
 
   assemble_start_function (current_function_decl, fnname);
-  final_start_function (get_insns (), asm_out_file, optimize);
-  final (get_insns (), asm_out_file, optimize);
+  rtx_insn *first = get_insns ();
+  final_start_function (&first, asm_out_file, optimize);
+  final (first, asm_out_file, optimize);
   if (flag_ipa_ra
       && !lookup_attribute ("noipa", DECL_ATTRIBUTES (current_function_decl)))
     collect_fn_hard_reg_usage ();
